@@ -1,0 +1,169 @@
+# omp-purge
+
+Session-level system-prompt switch for [omp](https://github.com/oh-my-pi/omp). One TypeScript
+file, no host patching, no files written — `/purge` swaps omp's static instruction block for
+your own persona, `/purge off` puts omp back exactly as it was.
+
+Lineage:
+
+- **[dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)** — the idea that you *clear* the
+  host identity instead of arguing with it, plus the per-item patch state machine
+  (`applied` / `unmatched` / `skipped` with a detail table).
+- **[pi-purge](https://github.com/ZiChuanLan/pi-purge)** — the shape: a single extension, a
+  session-scoped in-memory switch, three modes, safe degradation when an anchor no longer matches,
+  zero disk writes.
+
+## Why omp needs its own version
+
+omp ships as a single compiled Bun binary. There is no `lib/core.js` to patch, no approval layer to
+rewrite — `dsh-purge`'s host-patching engine has nothing to grab onto. What omp *does* expose is
+`before_agent_start`, which hands the extension the prompt as an **ordered block array**:
+
+```
+systemPrompt[0]  → static instruction block (112 KB in omp 18.12.6)
+systemPrompt[1]  → <project-context> footer (your AGENTS.md, repo rules, workspace tree, MCP routes)
+```
+
+So omp-purge cuts **by block and by section**, not with pi-purge's single-string surgery. The split
+is also where the cache breakpoint lives, which is why `strict` can throw away the harness scaffold
+and still keep your own repo rules in the cache-stable tail.
+
+## Install
+
+Copy (or symlink) the extension into omp's user extension directory:
+
+```bash
+mkdir -p ~/.omp/agent/extensions
+ln -sf "$PWD/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
+```
+
+Or load it for one run only:
+
+```bash
+omp -e /absolute/path/to/extensions/omp-purge.ts
+```
+
+Or install it as a package (the manifest declares both `omp.extensions` and `pi.extensions`):
+
+```bash
+omp plugin link /absolute/path/to/omp-purge
+```
+
+`--plugin-dir` does **not** load extension modules — it loads plugin package directories. Use `-e`,
+a discovered extension directory, or `omp plugin link`.
+
+Requires omp ≥ 18. Node ≥ 22.19 for the test suite (native TypeScript type-stripping).
+
+## Usage
+
+`/purge` is off until you turn it on. Nothing changes in your omp session until then.
+
+| Command | Effect |
+| --- | --- |
+| `/purge` | toggle on/off |
+| `/purge on` / `off` | explicit on/off |
+| `/purge status` | state, mode, persona source, last run, per-cut detail table |
+| `/purge mode strict\|replace\|append` | switch mode |
+| `/purge source <abs-path\|embedded>` | point at a persona file, or back to the built-in example |
+| `/purge reload` | re-read the current persona file |
+| `/purge cut <ID> cut\|keep` | override one cut for the current mode |
+| `/purge cut reset` | drop all overrides |
+| `/purge preview` | show the first 400 characters that will be sent |
+
+### Modes
+
+| Mode | Static block | Footer (`<project-context>`) | Use when |
+| --- | --- | --- | --- |
+| `strict` (default) | dropped entirely; replaced with `Current working directory: <cwd>` + persona | kept, minus omp's own `<critical>` tail | you want only your own instructions plus your repo's rules |
+| `replace` | identity cuts removed, tool policy / workflow kept | kept | you want your own role without losing omp's operating procedure |
+| `append` | untouched | untouched; persona inserted as its own block after block 0 | you want an audit-friendly additive layer |
+
+### Persona source
+
+Resolved in this order:
+
+1. `OMP_PURGE_SOURCE` environment variable
+2. `~/.dsh/prompt-inject.md` — shared with the dsh side of the same machine
+3. the built-in example text in `extensions/omp-purge.ts`
+
+A missing **default** source falls back to the embedded example silently (so a fresh install works).
+A missing **explicitly named** source is an error and keeps the previously loaded body.
+
+### Environment variables
+
+| Variable | Values | Meaning |
+| --- | --- | --- |
+| `OMP_PURGE_SOURCE` | path or `embedded` | initial persona source |
+| `OMP_PURGE_MODE` | `strict` \| `replace` \| `append` | initial mode |
+| `OMP_PURGE_AUTOSTART` | `1`/`true`/`yes`/`on` | start enabled each session |
+
+Environment only seeds the initial state. Nothing is ever written back to `config.yml` or anywhere
+else on disk.
+
+## The cut table
+
+Fourteen anchors, taken from the rendered text of omp 18.12.6's
+`src/prompts/system/system-prompt.md`. `strict` and `replace` differ only in which ones they enable.
+
+| ID | Section | Scope | `replace` | `strict` |
+| --- | --- | --- | :-: | :-: |
+| `HOST_PREAMBLE` | RFC 2119 / XML-authority preamble | static | ✓ | ✓ |
+| `ROLE_SECTION` | `§ Role` + "You are omp's trusted coding assistant." | static | ✓ | ✓ |
+| `PERSONALITY` | `# Personality` (from `config.yml#personality`) | static | ✓ | ✓ |
+| `ENGINEERING` | `# Engineering` | static | | ✓ |
+| `SKILLS_RULES` | `# Skills & Rules` incl. `<skills>` | static | | ✓ |
+| `INTERNAL_URLS` | `# Internal URLs` (`omp://` doc index) | static | ✓ | ✓ |
+| `TOOL_INVENTORY` | `# Tool Inventory` | static | ✓ | ✓ |
+| `XD_DEVICES` | `# xd:// Tool Devices` | static | ✓ | ✓ |
+| `SCRATCHPAD` | `§ Scratchpad` | static | | ✓ |
+| `TOOL_POLICY` | `§ Tool Policy` | static | | ✓ |
+| `WORKFLOW` | `§ Workflow` | static | | ✓ |
+| `DELIVERY` | `§ Delivery` | static | | ✓ |
+| `CRITICAL` | `§ Critical` | static | | ✓ |
+| `FOOTER_CRITICAL` | `<critical>` tail | footer | | ✓ |
+
+`append` uses no cuts at all.
+
+### Safe degradation
+
+Every anchor is matched by a line-level `startsWith` against the trimmed line — never by index,
+never by byte offset. When an anchor is absent:
+
+- that single cut is reported `unmatched` in `/purge status`
+- the cut is skipped; the rest still run
+- the prompt is never truncated at a guessed boundary
+
+A real example: on an omp session without the `think` tool, `SCRATCHPAD` legitimately reports
+`unmatched  § Scratchpad`, and everything else applies. That is the state machine working, not a bug.
+
+## Verify
+
+```bash
+npm test
+```
+
+`test/omp-purge-cuts.test.mjs` covers boundary semantics (open vs. closed spans, missing end
+markers, the preamble sentinel, scope isolation, empty-block collapse).
+`test/omp-purge.test.mjs` drives the real handler with an omp-18.12.6-shaped fixture: three modes,
+toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempotency.
+
+## Limits — read this before trusting it
+
+- **Anchors are version-pinned.** They were verified against omp 18.12.6. An omp upgrade that
+  rewrites those headings degrades to `unmatched` cuts, not to a broken prompt — but it also means
+  the persona may no longer be replacing what you think it is. Re-run `/purge status` after every
+  omp upgrade. `unmatched` on `ROLE_SECTION` means "the host identity is still there".
+- **Tool schemas are not prompts.** Tools reach the model through the API `tools` parameter, not
+  through `systemPrompt`. No prompt-layer extension can remove a tool; use
+  `omp --no-extensions`, `setActiveTools`, or your omp tool config for that.
+- **The footer is yours, not omp's.** In `strict`, your `AGENTS.md`, `<repo-rules>`,
+  `<dir-context>`, `<workspace-tree>`, and the MCP routes still go out. The extension strips only
+  omp's own `<critical>` tail from that block; everything else in the footer is content you wrote.
+- **Not a security boundary.** This changes what the model is told, not what the process may do.
+  omp's permissions are your OS user's permissions. Isolation is a container/VM question.
+- **`strict` drops `# Tool Inventory`.** The tools remain callable; the model just is not told they
+  exist by name. If a tool-using session starts flailing after `/purge mode strict`, that is why.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,59 @@
+{
+  "name": "omp-purge",
+  "version": "0.1.0",
+  "description": "omp extension: session-level system-prompt switch — cuts host scaffolding sections (identity, tool policy, workflow) and mounts your own persona, with a per-section applied/unmatched/skipped status table",
+  "type": "module",
+  "license": "MIT",
+  "author": "ZhangEx18",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZhangEx18/omp-purge.git"
+  },
+  "homepage": "https://github.com/ZhangEx18/omp-purge#readme",
+  "bugs": {
+    "url": "https://github.com/ZhangEx18/omp-purge/issues"
+  },
+  "keywords": [
+    "omp",
+    "omp-package",
+    "omp-extension",
+    "oh-my-pi",
+    "system-prompt",
+    "prompt-engineering",
+    "prompt-evaluation"
+  ],
+  "files": [
+    "extensions",
+    "test",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node test/omp-purge.test.mjs && node test/omp-purge-cuts.test.mjs"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@oh-my-pi/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "omp": {
+    "extensions": [
+      "./extensions/omp-purge.ts"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/omp-purge.ts"
+    ]
+  }
+}
