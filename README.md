@@ -79,6 +79,20 @@ omp -e /absolute/path/to/extensions/omp-purge.ts
 | `/purge reanchor` | 运行时重锚：`list` \| `save` \| `reset` \| `<ID> start\|end <标记…>` |
 | `/purge tools` | 工具裁剪：`list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
+### 幂等：被加载两次也只插一份人设
+
+omp 不按 realpath 去重扩展入口。软链自动发现（`~/.omp/agent/extensions/omp-purge.ts`）与命令行
+`-e /path/to/omp-purge.ts` 指向同一份源码时，factory 会跑**两次**，两个 `before_agent_start`
+handler **串联**执行 —— 第二个拿到的是第一个的输出。
+
+切除本身幂等（切过的东西再切一遍还是那样），但**人设插入不是**：实测 `append` 模式下曾出现
+4 块 `112484 + 21175 + 21175 + 25144`，人设重复一份，每轮白烧约 6k token。
+
+v0.2.3 加了一道判据：**本扩展插入的人设正文已经出现在块数组里，就原样返回 `undefined`**。
+同时 `-e` 两次、三次加载实测都只插一份。
+
+用 `omp -e` 手工加载时不必再担心忘记 `--no-extensions`。
+
 ### status 首行是版本号
 
 ```

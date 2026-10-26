@@ -121,7 +121,7 @@ const HOST_TAG =
  * /purge status 第一行展示它：判断「当前进程加载的是哪个版本的代码」只有这一个可靠信号，
  * 因为扩展模块每进程只 import 一次，改了文件不重启也是旧代码。
  */
-const PLUGIN_VERSION = "0.2.2";
+const PLUGIN_VERSION = "0.2.3";
 
 // ============================================================================
 // 切除表（dsh-purge 的补丁表在这里映射成「可切除的宿主段落」）
@@ -705,6 +705,17 @@ export default function ompPurge(pi: ExtApi) {
 		lastPrompt = { static: staticBlocks.join("\n\n"), footer: footerBlocks.join("\n\n") };
 		const persona = body.trim();
 		const active = activeCuts(mode);
+
+		// 幂等性：本扩展可能被加载两次（自动发现的软链 + 命令行 -e 指向同一文件，
+		// 或两个路径指向同一份源码）。omp 不按 realpath 去重，两次都注册 handler，
+		// 而 handler 是**串联**的 —— 第二次会拿到第一次的输出再处理一遍。
+		// 判据是本扩展自己插入的人设块已在数组里：说明上游还有一个自己在跑。
+		// 此时原样返回，不重复插入（切除本身幂等，人设插入不是）。
+		if (persona.length > 0 && blocks.some(block => block.trim() === persona)) {
+			// 不碰 lastRun：上游那个自己已经写了准确的逐项状态，这里覆盖只会让
+			// /purge status 变成 applied 0。返回 undefined = 不改写宿主提示词。
+			return undefined;
+		}
 
 		// footer 侧的切除（scope = "footer"）：<critical> 是 omp 生成的收尾硬约束，
 		// 不属于用户的 AGENTS.md，所以 strict/replace 都能切。

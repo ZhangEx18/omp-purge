@@ -85,6 +85,22 @@ Requires omp ≥ 18. Node ≥ 22.19 for the test suite (native TypeScript type-s
 | `/purge reanchor` | runtime re-anchoring: `list` \| `save` \| `reset` \| `<ID> start\|end <marker…>` |
 | `/purge tools` | tool trimming: `list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
+### Idempotent: loaded twice still inserts one persona
+
+omp does not dedupe extension entries by realpath. When auto-discovery
+(`~/.omp/agent/extensions/omp-purge.ts`) and a command-line `-e /path/to/omp-purge.ts` point at the
+same source, the factory runs **twice** and the two `before_agent_start` handlers run **in
+sequence** — the second receives the first's output.
+
+Cutting is idempotent (a cut span stays cut), but **persona insertion is not**: measured in
+`append` mode, four blocks appeared — `112484 + 21175 + 21175 + 25144` — the persona duplicated,
+burning about 6k extra tokens every turn.
+
+v0.2.3 adds a guard: **if this extension's own persona body is already in the block array, return
+`undefined` unchanged**. Verified with `-e` given two and three times: still one insertion.
+
+You no longer need to remember `--no-extensions` when loading by hand.
+
 ### The first line of status is the version
 
 ```

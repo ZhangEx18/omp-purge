@@ -425,4 +425,38 @@ async function freshExtension({ flags = {}, tools = null } = {}) {
 	);
 }
 
+// ========================================================== 幂等（重复加载）
+{
+	// omp 不按 realpath 去重：软链自动发现 + `-e` 指向同一文件时，factory 会跑两次，
+	// 两个 handler 串联执行。若不幂等，append 模式下人设会插两次（真实实测 4 块）。
+	const { fire, run, prompt } = await freshExtension();
+	await fire({ type: "session_start" });
+	await run("mode append");
+	await run("on");
+
+	const first = (await fire(prompt())).systemPrompt;
+	assert.equal(first.length, 3, "单次执行：static + persona + footer");
+	assert.equal(first[1], first[1].trim(), "人设块应是 trim 过的正文");
+
+	// 把上一次的输出当输入再跑一遍 —— 等价于第二个 handler 接收第一个的输出。
+	// 返回 undefined 就是「不改写」，宿主保留上游结果，正是幂等。
+	const secondResult = await fire({ ...prompt(), systemPrompt: [...first] });
+	assert.equal(secondResult, undefined, "重复执行应返回 undefined（不改写）");
+	const after = secondResult?.systemPrompt ?? [...first];
+	assert.equal(
+		after.filter((b) => b === first[1]).length,
+		1,
+		"人设块必须只有一份，不能被插入第二次",
+	);
+
+	// strict 模式同理
+	const s2 = await freshExtension();
+	await s2.fire({ type: "session_start" });
+	await s2.run("mode strict");
+	await s2.run("on");
+	const strictFirst = (await s2.fire(s2.prompt())).systemPrompt;
+	const strictSecond = await s2.fire({ ...s2.prompt(), systemPrompt: [...strictFirst] });
+	assert.equal(strictSecond, undefined, "strict 重复执行同样必须幂等");
+}
+
 console.log("omp-purge-advanced.test.mjs: all assertions passed");
