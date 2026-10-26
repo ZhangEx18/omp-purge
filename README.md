@@ -79,6 +79,23 @@ omp -e /absolute/path/to/extensions/omp-purge.ts
 | `/purge reanchor` | 运行时重锚：`list` \| `save` \| `reset` \| `<ID> start\|end <标记…>` |
 | `/purge tools` | 工具裁剪：`list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
+### status 首行是版本号
+
+```
+omp-purge 0.2.2  状态: 开启（仅本会话）  模式: strict（只发人设 + 工作目录 + <project-context>）
+```
+
+这一行是为了回答一个只有它才能回答的问题：**当前这个 omp 进程里跑的到底是哪一版代码。**
+
+omp 加载扩展时给模块路径加 `?mtime` cache-buster，但那**只在加载那一刻求值一次**（`omp read
+omp://extension-loading.md`：「Modules are not unloaded or re-evaluated … require a restart」）。
+所以改完文件不重启，进程里仍是旧模块，行为差异却很难看出来 —— 你会以为是新代码没生效，或者更糟，
+以为升级已经修好了某个 bug。版本号摆在第一行，这种事一眼可辨。
+
+`PLUGIN_VERSION` 是硬编码的（软链安装时本文件在别处，运行时 `import package.json` 的路径不确定）。
+忘了 bump 时 `npm test` 会红：`test/omp-purge-advanced.test.mjs` 断言它与 `package.json` 的
+`version` 一致。
+
 ### 三模式
 
 | 模式 | 静态块 | Footer（`<project-context>`） | 适用 |
@@ -285,7 +302,7 @@ hooks、tools、agents、MCP。要拿到新扩展代码，重启 `omp` 或开新
 在会话里确认当前真正生效的是什么：
 
 ```
-/purge status      # 模式、人设源、逐项 applied/unmatched/skipped
+/purge status      # 版本、模式、人设源、逐项 applied/unmatched/skipped
 ```
 
 ### 锁定某个版本

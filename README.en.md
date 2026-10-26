@@ -85,6 +85,26 @@ Requires omp ≥ 18. Node ≥ 22.19 for the test suite (native TypeScript type-s
 | `/purge reanchor` | runtime re-anchoring: `list` \| `save` \| `reset` \| `<ID> start\|end <marker…>` |
 | `/purge tools` | tool trimming: `list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
+### The first line of status is the version
+
+```
+omp-purge 0.2.2  状态: 开启（仅本会话）  模式: strict（只发人设 + 工作目录 + <project-context>）
+```
+
+That line answers a question nothing else can: **which version of the code is running inside this
+particular omp process.**
+
+omp appends a `?mtime` cache-buster when it imports an extension module, but that is evaluated
+**once, at load time** (`omp read omp://extension-loading.md`: "Modules are not unloaded or
+re-evaluated … require a restart"). Edit the file without restarting and the process keeps the old
+module while the behaviour difference stays invisible — you conclude the change did not take
+effect, or worse, that an upgrade fixed something it did not. A version on line one makes that
+unmistakable.
+
+`PLUGIN_VERSION` is hardcoded (under a symlinked install this file lives elsewhere, so
+`import package.json` at runtime has no dependable path). Forgetting to bump it turns `npm test`
+red: `test/omp-purge-advanced.test.mjs` asserts it equals `version` in `package.json`.
+
 ### Modes
 
 | Mode | Static block | Footer (`<project-context>`) | Use when |
@@ -307,7 +327,7 @@ Restart `omp`, or start a new session, to pick up new extension code.
 Check what is actually live inside the session:
 
 ```
-/purge status      # mode, persona source, per-cut applied/unmatched/skipped
+/purge status      # version, mode, persona source, per-cut applied/unmatched/skipped
 ```
 
 ### Pin a specific revision

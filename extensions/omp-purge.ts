@@ -111,6 +111,18 @@ const HOST_TAG =
 	process.env.npm_package_version?.trim() ||
 	"unknown";
 
+/**
+ * 本扩展自身版本。
+ *
+ * 为什么不从 package.json 读：软链安装时本文件在别处，`import package.json` 会跨目录；
+ * 而 omp 把 .ts 直接交给 bun，路径解析不确定。硬编码 + 一个测试盯着它，
+ * 比运行时猜路径更可靠 —— 忘了 bump 时测试会红，不会静默说谎。
+ *
+ * /purge status 第一行展示它：判断「当前进程加载的是哪个版本的代码」只有这一个可靠信号，
+ * 因为扩展模块每进程只 import 一次，改了文件不重启也是旧代码。
+ */
+const PLUGIN_VERSION = "0.2.2";
+
 // ============================================================================
 // 切除表（dsh-purge 的补丁表在这里映射成「可切除的宿主段落」）
 // ============================================================================
@@ -816,7 +828,7 @@ export default function ompPurge(pi: ExtApi) {
 				const guarded = tally("guarded");
 				const unmatched = tally("unmatched");
 				return [
-					`状态: ${enabled ? "开启" : "关闭"}（仅本会话）  模式: ${modeLabel}`,
+					`omp-purge ${PLUGIN_VERSION}  状态: ${enabled ? "开启" : "关闭"}（仅本会话）  模式: ${modeLabel}`,
 					`人设: ${srcLabel}  ${body.length > 0 ? `${body.length} 字符` : `未加载${loadError ? `（${loadError}）` : ""}`}`,
 					`上轮: ${run}`,
 					lastRun
@@ -1186,4 +1198,5 @@ export {
 	anchorOverrides,
 	ANCHORS_PATH,
 	HOST_TAG,
+	PLUGIN_VERSION,
 };

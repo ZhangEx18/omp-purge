@@ -3,7 +3,7 @@
 // 与 omp-purge.test.mjs 的分工：
 //   那个文件验证三模式与切除表本身；这里只验证 v0.2 新增的四个能力面。
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -398,6 +398,31 @@ async function freshExtension({ flags = {}, tools = null } = {}) {
 	const { mod } = await freshExtension();
 	assert.equal(typeof mod.HOST_TAG, "string");
 	assert.ok(mod.HOST_TAG.length > 0, "HOST_TAG 始终有值（取不到时是 unknown）");
+}
+
+// ============================================================ 版本一致性
+{
+	// 硬编码版本的风险是忘记 bump：这里让 package.json 与源码互相盯着。
+	// 版本号本身也是 /purge status 的第一行，用户靠它判断当前进程加载的代码是新的。
+	const { mod } = await freshExtension();
+	const pkg = JSON.parse(
+		readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"),
+	);
+	assert.equal(
+		mod.PLUGIN_VERSION,
+		pkg.version,
+		`package.json (${pkg.version}) 与 PLUGIN_VERSION (${mod.PLUGIN_VERSION}) 必须一致`,
+	);
+	assert.match(mod.PLUGIN_VERSION, /^\d+\.\d+\.\d+$/, "版本号应是 semver");
+
+	// status 第一行必须带版本，否则用户无法判断进程里装的是哪一版
+	const { fire, run, lastNote } = await freshExtension();
+	await fire({ type: "session_start" });
+	await run("status");
+	assert.ok(
+		lastNote().includes(`omp-purge ${mod.PLUGIN_VERSION}`),
+		`status 应显示版本，实际: ${lastNote()}`,
+	);
 }
 
 console.log("omp-purge-advanced.test.mjs: all assertions passed");
