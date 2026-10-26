@@ -175,3 +175,66 @@ npm test
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。
+
+## 安装
+
+两条路，看你需不需要改源码。
+
+### A. 软链一份 checkout（作者本人用的）
+
+```sh
+git clone https://github.com/ZhangEx18/omp-purge
+ln -sf "$PWD/omp-purge/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
+```
+
+更新就是 `git pull` —— 软链指向工作区，下一个 omp 会话直接读到新代码。没有安装步骤，没有缓存要清。
+
+### B. `omp plugin install`（机器上不留 checkout）
+
+```sh
+omp plugin install https://github.com/ZhangEx18/omp-purge
+omp plugin list            # omp-purge@<version>，enabled: true
+```
+
+它通过 Bun 把仓库解析到 `~/.omp/plugins/node_modules/omp-purge`，并登记进 `omp-plugins.lock.json`。
+扩展入口读的是 `package.json` 里的 `omp.extensions`。
+
+## 更新
+
+```sh
+# A：软链的 checkout
+cd omp-purge && git pull
+
+# B：plugin install
+omp plugin install https://github.com/ZhangEx18/omp-purge   # 重跑 install，会重新解析 HEAD
+```
+
+`omp plugin upgrade` 只遍历 **marketplace** 插件（`name@marketplace`）；用 Git URL 装进来的是
+npm 风格的依赖，`upgrade` 会回一句「All marketplace plugins are up to date」然后什么都不做。
+用同一个 URL 重跑 `install` 才是它的更新路径。
+
+两条路都一样：新模块只在**新会话**里生效。扩展模块每进程只 import 一次（加载时带 `?mtime`
+缓存破坏），而 `/reload-plugins` 明确**不**重新 import 扩展模块 —— 它刷的是 skills、commands、
+hooks、tools、agents、MCP。要拿到新扩展代码，重启 `omp` 或开新会话。
+
+在会话里确认当前真正生效的是什么：
+
+```
+/purge status      # 模式、人设源、逐项 applied/unmatched/skipped
+```
+
+### 锁定某个版本
+
+```sh
+omp plugin install https://github.com/ZhangEx18/omp-purge#v0.1.1
+```
+
+## 卸载
+
+```sh
+# A
+rm ~/.omp/agent/extensions/omp-purge.ts
+
+# B
+omp plugin uninstall omp-purge
+```

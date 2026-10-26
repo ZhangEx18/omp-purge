@@ -185,3 +185,68 @@ toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempot
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Install
+
+Two ways in. Pick by whether you want to edit the source.
+
+### A. Symlink a checkout (what this repo's author uses)
+
+```sh
+git clone https://github.com/ZhangEx18/omp-purge
+ln -sf "$PWD/omp-purge/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
+```
+
+Updates are `git pull` — the symlink points at the working tree, so the next omp session
+picks the new code up. No install step, no cache to clear.
+
+### B. `omp plugin install` (no checkout on the machine)
+
+```sh
+omp plugin install https://github.com/ZhangEx18/omp-purge
+omp plugin list            # omp-purge@<version>, enabled: true
+```
+
+This resolves the repo through Bun into `~/.omp/plugins/node_modules/omp-purge` and records it in
+`omp-plugins.lock.json`. The extension entry is read from `package.json` `omp.extensions`.
+
+## Update
+
+```sh
+# A: symlinked checkout
+cd omp-purge && git pull
+
+# B: plugin install
+omp plugin install https://github.com/ZhangEx18/omp-purge   # re-run install; it re-resolves HEAD
+```
+
+`omp plugin upgrade` only walks **marketplace** plugins (`name@marketplace`); a Git-URL install is
+recorded as an npm-style dependency, so `upgrade` reports "All marketplace plugins are up to date"
+and does nothing for it. Re-running `install` with the same URL is the update path.
+
+Either way the new module only takes effect in a **new session**. Extension modules are imported
+once per process (with a `?mtime` cache-buster at load time), and `/reload-plugins` explicitly does
+not re-import extension modules — it refreshes skills, commands, hooks, tools, agents and MCP.
+Restart `omp`, or start a new session, to pick up new extension code.
+
+Check what is actually live inside the session:
+
+```
+/purge status      # mode, persona source, per-cut applied/unmatched/skipped
+```
+
+### Pin a specific revision
+
+```sh
+omp plugin install https://github.com/ZhangEx18/omp-purge#v0.1.1
+```
+
+## Uninstall
+
+```sh
+# A
+rm ~/.omp/agent/extensions/omp-purge.ts
+
+# B
+omp plugin uninstall omp-purge
+```
