@@ -1,7 +1,7 @@
 {
   "name": "omp-purge",
-  "version": "0.1.2",
-  "description": "omp extension: session-level system-prompt switch — cuts host scaffolding sections (identity, tool policy, workflow) and mounts your own persona, with a per-section applied/unmatched/skipped status table",
+  "version": "0.2.0",
+  "description": "omp extension: session-level system-prompt switch — cuts host scaffolding sections (identity, tool policy, workflow) and mounts your own persona, with a per-section applied/guarded/unmatched/skipped status table, runtime re-anchoring, anchor doctor, and tool trimming",
   "type": "module",
   "license": "MIT",
   "author": "ZhangEx18",
@@ -33,7 +33,7 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node test/omp-purge.test.mjs && node test/omp-purge-cuts.test.mjs"
+    "test": "node test/omp-purge.test.mjs && node test/omp-purge-cuts.test.mjs && node test/omp-purge-advanced.test.mjs"
   },
   "peerDependencies": {
     "@oh-my-pi/pi-coding-agent": ">=18.0.0"

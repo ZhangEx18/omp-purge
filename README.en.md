@@ -81,6 +81,9 @@ Requires omp ≥ 18. Node ≥ 22.19 for the test suite (native TypeScript type-s
 | `/purge cut <ID> cut\|keep` | override one cut for the current mode |
 | `/purge cut reset` | drop all overrides |
 | `/purge preview` | show the first 400 characters that will be sent |
+| `/purge doctor` | anchor health check: per-cut hit/miss plus unrecognised headings in the host prompt |
+| `/purge reanchor` | runtime re-anchoring: `list` \| `save` \| `reset` \| `<ID> start\|end <marker…>` |
+| `/purge tools` | tool trimming: `list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
 ### Modes
 
@@ -108,9 +111,70 @@ A missing **explicitly named** source is an error and keeps the previously loade
 | `OMP_PURGE_SOURCE` | path or `embedded` | initial persona source |
 | `OMP_PURGE_MODE` | `strict` \| `replace` \| `append` | initial mode |
 | `OMP_PURGE_AUTOSTART` | `1`/`true`/`yes`/`on` | start enabled each session |
+| `OMP_PURGE_ANCHORS` | path | where the re-anchor file lives (default `~/.omp/purge/anchor-overrides.json`) |
 
-Environment only seeds the initial state. Nothing is ever written back to `config.yml` or anywhere
-else on disk.
+Environment only seeds the initial state. **CLI flags win over environment** (`registerFlag` +
+`getFlag`, verified on omp 18):
+
+```sh
+omp --purge-on --purge-mode=strict          # enabled for one run
+omp --purge-mode=replace --purge-source=/path/to/persona.md
+```
+
+| Flag | Values | Same as |
+| --- | --- | --- |
+| `--purge-on` | boolean | start enabled |
+| `--purge-mode` | `strict` \| `replace` \| `append` | initial mode |
+| `--purge-source` | path or `embedded` | initial persona source |
+
+Flags and environment both only seed initial state. **The one thing that ever touches disk** is the
+re-anchor file written by an explicit `/purge reanchor save` — it does not exist until you type that
+command.
+
+## Re-anchoring (after a host upgrade breaks the anchors)
+
+`/purge doctor` lists the headings that exist in the host but that we do not recognise — that is the
+raw material for re-anchoring.
+
+```
+/purge reanchor WORKFLOW start § Process      # this cut now starts at the new heading
+/purge reanchor WORKFLOW end § Delivery       # and ends here
+/purge reanchor TOOL_POLICY end § Process
+/purge reanchor list
+/purge reanchor save                          # the only action that writes to disk
+/purge reanchor reset                         # clears memory and file
+```
+
+Overrides live in `~/.omp/purge/anchor-overrides.json` (relocate with `OMP_PURGE_ANCHORS`):
+
+```json
+{ "version": 1, "host": "18.12.6", "savedAt": "…",
+  "overrides": { "WORKFLOW": { "start": ["§ Process"], "end": ["§ Delivery"] } } }
+```
+
+The design is lifted from dsh-purge's `lib/anchors.js`: **do not edit plugin source — overlay the
+real fragment taken from the running host onto that one cut.** The difference is that dsh-purge has
+to re-run apply after writing, while this loads the file at session start. Missing file, corrupt
+JSON, unknown cut ids — all skipped silently; the extension keeps working.
+
+## Tool trimming
+
+The counterpart to dsh-purge's `MINIMAL_OFFICIAL_TOOLSET`:
+
+```
+/purge tools list                 # N active / M inactive
+/purge tools keep read,bash,todo  # keep only these
+/purge tools drop browser,task    # disable these
+/purge tools reset                # back to the pre-trim set
+```
+
+**This must run from a command, never from `before_agent_start`**: omp's docs state that a handler
+awaiting `pi.setActiveTools()` changes the source base, so the host discards that attempt's overrides
+and repeats preparation from the winning base, at most three times. Command context has no such
+issue.
+
+`keep`/`drop` refuse to produce an empty set (that would disable every tool). The pre-trim set is
+remembered in memory for `reset` and is cleared on session switch.
 
 ## The cut table
 
@@ -152,13 +216,22 @@ found. When either is absent:
 A sibling guard backs this up: while scanning for an end marker, hitting any *other* cut's start
 marker ends the span there. So a renamed heading costs you one cut, not the rest of the document.
 
+**Ending a span at a sibling reports `guarded`, not `applied`.** This is the fourth state and the
+easiest one to miss: the boundary is safe (nothing ate through), but the cut **did not find its own
+end anchor** — everything between where it actually ends and the next sibling heading gets removed,
+including upstream sections we do not know about. The status table has to say so, or it is lying
+again. `/purge status` appends a warning when `guarded > 0`, `/purge doctor` lists the unclaimed
+headings, and `/purge reanchor` turns the cut back into `applied` by pointing its boundary at them.
+
 Two real examples:
 
 - On an omp session without the `think` tool, `SCRATCHPAD` reports `unmatched  § Scratchpad` and
   everything else applies. The state machine working as intended.
-- `omp` renames `§ Workflow` to `§ Process`: `TOOL_POLICY` and `WORKFLOW` go `unmatched`, and the
-  remaining ~100 KB of the block survives untouched. (v0.1.0 silently ate all of it down to 61
-  characters here — that is what the v0.1.1 fix addresses; see `test/omp-purge-cuts.test.mjs`.)
+- `omp` renames `§ Workflow` to `§ Process`: `TOOL_POLICY` goes `guarded` (boundary snapped at
+  `§ Delivery`, and `§ Process` went with it), `WORKFLOW` goes `unmatched`, and the remaining ~100 KB
+  of the block survives untouched. (v0.1.0 silently ate all of it down to 61 characters here — that
+  is what the v0.1.1 fix addresses; see `test/omp-purge-cuts.test.mjs`.) After
+  `reanchor TOOL_POLICY end § Process` + `WORKFLOW start § Process`, both return to `applied`.
 
 ## Verify
 
@@ -170,6 +243,12 @@ npm test
 markers, the preamble sentinel, scope isolation, empty-block collapse).
 `test/omp-purge.test.mjs` drives the real handler with an omp-18.12.6-shaped fixture: three modes,
 toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempotency.
+`test/omp-purge-advanced.test.mjs` covers flag precedence, the `guarded` tri-state, re-anchoring
+(memory / on-disk / corrupt file / unknown id / argument validation), `doctor`, `tools` trimming and
+its degradation path, and `HOST_TAG`.
+
+Everything runs inside a `mkdtempSync` directory (`OMP_PURGE_ANCHORS` points at it), so your real
+`~/.omp/purge/` is never touched.
 
 ## Limits — read this before trusting it
 
@@ -193,6 +272,12 @@ toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempot
   omp's permissions are your OS user's permissions. Isolation is a container/VM question.
 - **`strict` drops `# Tool Inventory`.** The tools remain callable; the model just is not told they
   exist by name. If a tool-using session starts flailing after `/purge mode strict`, that is why.
+- **Re-anchoring never happens automatically.** `doctor` only surfaces the clues; wiring `§ Process`
+  onto `WORKFLOW` is still a command you type. Deliberately not auto-matched — guessing a boundary is
+  more dangerous than failing visibly.
+- **Read `guarded` as a warning, not a success.** It means the cut snapped at a sibling heading, so
+  unknown sections in between may have been removed with it. Either re-anchor it or make that
+  heading its own cut.
 
 ## Update
 

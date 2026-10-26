@@ -75,6 +75,9 @@ omp -e /absolute/path/to/extensions/omp-purge.ts
 | `/purge cut <ID> cut\|keep` | 在当前模式下单独覆盖某一项 |
 | `/purge cut reset` | 清空所有手动覆盖 |
 | `/purge preview` | 看将要发送的前 400 字符 |
+| `/purge doctor` | 锚点体检：逐项命中/失配 + 宿主里不认识的段头（重锚线索） |
+| `/purge reanchor` | 运行时重锚：`list` \| `save` \| `reset` \| `<ID> start\|end <标记…>` |
+| `/purge tools` | 工具裁剪：`list` \| `keep a,b,c` \| `drop a,b` \| `reset` |
 
 ### 三模式
 
@@ -102,8 +105,65 @@ omp -e /absolute/path/to/extensions/omp-purge.ts
 | `OMP_PURGE_SOURCE` | 路径或 `embedded` | 初始人设来源 |
 | `OMP_PURGE_MODE` | `strict` \| `replace` \| `append` | 初始模式 |
 | `OMP_PURGE_AUTOSTART` | `1`/`true`/`yes`/`on` | 每个会话自动开启 |
+| `OMP_PURGE_ANCHORS` | 路径 | 重锚文件的落点（默认 `~/.omp/purge/anchor-overrides.json`） |
 
-环境变量只播种初始状态。任何东西都不会写回 `config.yml` 或磁盘上别的位置。
+环境变量只播种初始状态。**CLI flag 优先于环境变量**（`registerFlag` + `getFlag`，omp 18 实测有效）：
+
+```sh
+omp --purge-on --purge-mode=strict          # 一次性开启
+omp --purge-mode=replace --purge-source=/path/to/persona.md
+```
+
+| Flag | 取值 | 对应 |
+| --- | --- | --- |
+| `--purge-on` | 布尔 | 启动即开启 |
+| `--purge-mode` | `strict` \| `replace` \| `append` | 初始模式 |
+| `--purge-source` | 路径或 `embedded` | 初始人设来源 |
+
+环境变量与 flag 都只播种初始状态。**唯一的落盘**是 `/purge reanchor save` 显式写出的重锚文件
+—— 它默认不存在，你不敲那条命令就不会有任何文件被创建。
+
+## 重锚（宿主升级把锚点改坏之后）
+
+`/purge doctor` 会把「宿主里有、但我们不认识的段头」列出来 —— 那就是重锚的原料。
+
+```
+/purge reanchor WORKFLOW start § Process      # 本项从新标题开始
+/purge reanchor WORKFLOW end § Delivery       # 本项到新标题结束
+/purge reanchor TOOL_POLICY end § Process
+/purge reanchor list
+/purge reanchor save                          # 唯一会写盘的动作
+/purge reanchor reset                         # 内存 + 文件一起清
+```
+
+覆盖存在 `~/.omp/purge/anchor-overrides.json`（可用 `OMP_PURGE_ANCHORS` 改），形如：
+
+```json
+{ "version": 1, "host": "18.12.6", "savedAt": "…",
+  "overrides": { "WORKFLOW": { "start": ["§ Process"], "end": ["§ Delivery"] } } }
+```
+
+设计取舍照抄 dsh-purge 的 `lib/anchors.js`：**不改插件源码，只把"从当前宿主里取出来的真实片段"
+叠到那条 cut 上**。区别是 dsh-purge 落盘后要重跑 apply，这里是会话启动自动加载，命中即生效。
+文件缺失、JSON 损坏、出现未知 cut id —— 一律静默跳过，扩展照常工作。
+
+## 工具裁剪
+
+对应 dsh-purge 的 `MINIMAL_OFFICIAL_TOOLSET`：
+
+```
+/purge tools list                 # 启用 N 个 / 未启用 M 个
+/purge tools keep read,bash,todo  # 只留这几个
+/purge tools drop browser,task    # 停用这几个
+/purge tools reset                # 还原到首次裁剪前
+```
+
+**必须在命令里改，不能在 `before_agent_start` 里调 `setActiveTools`**：omp 文档写明 handler
+`await pi.setActiveTools()` 会改 source base，宿主会丢弃本次全部 override 并从头重跑准备链，
+最多三轮。命令上下文没有这个问题。
+
+`keep`/`drop` 结果为空集合时拒绝执行（否则等于把工具全关掉）。首次裁剪前的集合记在内存里，
+`reset` 用它还原；会话切换即重置。
 
 ## 切除表
 
@@ -144,13 +204,21 @@ omp -e /absolute/path/to/extensions/omp-purge.ts
 另有一层兄弟护栏：扫描结束标记的途中一旦撞到**别的 cut 的起始标记**，就在那里收边。
 所以一个标题被改名，代价是丢一项，不是丢掉后面整篇。
 
+**靠兄弟护栏收边时报 `guarded`，不报 `applied`。** 这是第四种状态，也是最容易被忽略的一种：
+边界是安全的（没有吃穿），但它**没有命中自己的结束锚点** —— 从本段结束到下一个兄弟段头之间的
+内容，包括上游新增的、我们不认识的段，都被一起切掉了。状态表必须把这件事说出来，否则又是一次
+「报告与事实不符」。`/purge status` 见到 `guarded > 0` 会追加提示，`/purge doctor` 会列出那些
+没人认领的段头，用 `/purge reanchor` 把边界指过去就转回 `applied`。
+
 两个真实例子：
 
 - 没有 `think` 工具的 omp 会话里，`SCRATCHPAD` 报 `unmatched  § Scratchpad`，其他全部 applied。
   状态机按设计工作。
-- `omp` 把 `§ Workflow` 改名成 `§ Process`：`TOOL_POLICY` 与 `WORKFLOW` 转 `unmatched`，
-  该块剩下的约 100 KB 原样保留。（v0.1.0 在这里会静默吃穿到只剩 61 字符 —— 这正是 v0.1.1
-  修掉的问题，回归测试见 `test/omp-purge-cuts.test.mjs`。）
+- `omp` 把 `§ Workflow` 改名成 `§ Process`：`TOOL_POLICY` 转 `guarded`（靠 `§ Delivery` 收边，
+  代价是 `§ Process` 一起没了），`WORKFLOW` 转 `unmatched`，该块剩下的约 100 KB 原样保留。
+  （v0.1.0 在这里会静默吃穿到只剩 61 字符 —— 这正是 v0.1.1 修掉的问题，回归测试见
+  `test/omp-purge-cuts.test.mjs`。）重锚 `TOOL_POLICY end § Process` + `WORKFLOW start § Process`
+  之后两项都回到 `applied`。
 
 ## 验证
 
@@ -161,6 +229,11 @@ npm test
 `test/omp-purge-cuts.test.mjs` 覆盖边界语义（开区间 vs 闭区间、结束标记缺失、preamble 哨兵、
 作用域隔离、切空后折叠）。`test/omp-purge.test.mjs` 用 omp 18.12.6 形状的夹具驱动真实 handler：
 三模式、toggle、`status`、`cut` 覆盖、`source` 切换、reload、回退、幂等。
+`test/omp-purge-advanced.test.mjs` 覆盖 flag 优先级、`guarded` 三态、重锚（内存 / 落盘 / 坏文件 /
+未知 id / 参校验）、`doctor`、`tools` 裁剪与降级、`HOST_TAG`。
+
+测试全程在 `mkdtempSync` 出来的临时目录里跑（`OMP_PURGE_ANCHORS` 指向它），不碰你的真实
+`~/.omp/purge/`。
 
 ## 局限 —— 信任它之前请读这段
 
@@ -181,6 +254,10 @@ npm test
   权限；隔离是容器/VM 层面的事。
 - **`strict` 会丢掉 `# Tool Inventory`。** 工具仍然可调用，只是模型不被按名字告知它们存在。
   如果 `/purge mode strict` 之后带工具的会话开始乱撞，原因就在这。
+- **重锚不会自动发生。** `doctor` 只负责把线索摆出来，把 `§ Process` 接到 `WORKFLOW` 上仍是
+  你的一句命令。刻意不做自动匹配 —— 猜错边界比明着失配更危险。
+- **`guarded` 要当警告读，不是当成功读。** 它意味着这一项是靠兄弟段头收的边，中间可能有你不
+  认识的段落被一起切掉了。要么重锚，要么把那个段头也建成一条 cut。
 
 ## 更新
 

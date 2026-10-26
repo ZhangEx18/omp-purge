@@ -25,9 +25,9 @@
  * 本文件不 import 任何 omp 类型：omp 以 bun 直接加载 .ts，运行期没有类型检查，
  * 自带最小接口定义可以让它在任意 omp 版本上加载而不依赖包内类型路径。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ============================================================================
 // 最小宿主接口（只声明用到的部分，避免依赖 @oh-my-pi/pi-coding-agent 的类型）
@@ -41,6 +41,11 @@ interface Ctx {
 	};
 }
 
+interface ToolInfoLike {
+	name: string;
+	description?: string;
+}
+
 interface ExtApi {
 	on: (event: string, handler: (event: unknown, ctx: Ctx) => unknown) => void;
 	registerCommand?: (
@@ -51,6 +56,16 @@ interface ExtApi {
 			handler: (args: string, ctx: Ctx) => Promise<void>;
 		},
 	) => void;
+	/** 以下为可选能力：宿主版本没提供时各自跳过，不影响核心提示词层。 */
+	registerFlag?: (
+		name: string,
+		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
+	) => void;
+	getFlag?: (name: string) => boolean | string | undefined;
+	getActiveTools?: () => string[];
+	getAllTools?: () => ToolInfoLike[];
+	setActiveTools?: (toolNames: string[]) => Promise<void>;
+	setLabel?: (label: string) => void;
 }
 
 // ============================================================================
@@ -85,6 +100,16 @@ const DEFAULT_SOURCE = join(homedir(), ".dsh", "prompt-inject.md");
 const ENV_SOURCE = process.env.OMP_PURGE_SOURCE?.trim() || "";
 const ENV_MODE = process.env.OMP_PURGE_MODE?.trim().toLowerCase() || "";
 const ENV_AUTOSTART = /^(1|true|yes|on)$/i.test(process.env.OMP_PURGE_AUTOSTART?.trim() || "");
+
+/**
+ * 宿主版本标记：锚点绑的是这个版本的字面文本。
+ * 从 omp 注入的环境变量尽力取，取不到就标 unknown —— 不猜、不硬编码。
+ */
+const HOST_TAG =
+	process.env.OMP_VERSION?.trim() ||
+	process.env.OMP_CLI_VERSION?.trim() ||
+	process.env.npm_package_version?.trim() ||
+	"unknown";
 
 // ============================================================================
 // 切除表（dsh-purge 的补丁表在这里映射成「可切除的宿主段落」）
@@ -245,17 +270,129 @@ const CUTS: Cut[] = [
 const CUT_IDS = CUTS.map(cut => cut.id);
 const CUT_BY_ID = new Map(CUTS.map(cut => [cut.id, cut]));
 
-type CutStatus = "applied" | "unmatched" | "skipped";
+// ============================================================================
+// 锚点重覆盖（移植自 dsh-purge 的 lib/anchors.js）
+//
+// 上游 omp 改版把某个段头改名后，本文件里的字面锚点就失效了。
+// dsh-purge 的解法是允许把某个 pattern 换成「从当前宿主里取出来的真实片段」，
+// 而不去改插件源码 —— 这里保留同样的机制，但默认只存在于内存：
+//   /purge reanchor WORKFLOW start § Process        # 仅本会话
+//   /purge reanchor save                            # 显式落盘（唯一写盘入口）
+//   /purge reanchor reset                           # 清空（含落盘文件）
+// ============================================================================
+
+interface AnchorOverride {
+	/** 覆盖后的起始标记；省略 = 用内置锚点。 */
+	start?: string[];
+	/** 覆盖后的结束标记；显式 null = 声明「切到块末尾」。 */
+	end?: string[] | null;
+	/** 记录来源，便于 /purge doctor 追溯。 */
+	at: string;
+	host?: string;
+}
+
+const ANCHORS_PATH =
+	process.env.OMP_PURGE_ANCHORS?.trim() || join(homedir(), ".omp", "purge", "anchor-overrides.json");
+
+/** cut id → 覆盖项。空 = 全部走内置锚点。 */
+const anchorOverrides = new Map<string, AnchorOverride>();
+
+type CutStatus = "applied" | "guarded" | "unmatched" | "skipped";
+
+/** 取某个 cut 当前真正生效的锚点（有覆盖则用覆盖）。 */
+function effectiveCut(cut: Cut): { start: string[]; end: string[] | null } {
+	const ov = anchorOverrides.get(cut.id);
+	if (!ov) return { start: cut.start, end: cut.end };
+	return {
+		start: ov.start && ov.start.length > 0 ? ov.start : cut.start,
+		end: ov.end === undefined ? cut.end : ov.end,
+	};
+}
+
+/** 从落盘文件读覆盖；文件缺失/损坏都静默忽略（不阻止扩展加载）。 */
+function loadAnchorOverrides(): number {
+	anchorOverrides.clear();
+	try {
+		if (!existsSync(ANCHORS_PATH)) return 0;
+		const parsed = JSON.parse(readFileSync(ANCHORS_PATH, "utf8")) as {
+			overrides?: Record<string, AnchorOverride>;
+		};
+		const entries = parsed?.overrides ?? {};
+		let loaded = 0;
+		for (const [id, ov] of Object.entries(entries)) {
+			if (!CUT_BY_ID.has(id) || !ov || typeof ov !== "object") continue;
+			anchorOverrides.set(id, ov);
+			loaded += 1;
+		}
+		return loaded;
+	} catch {
+		return 0;
+	}
+}
+
+/** 显式落盘（唯一写盘入口）。返回写入的覆盖条数。 */
+function saveAnchorOverrides(): number {
+	writeFileSync(
+		ANCHORS_PATH,
+		`${JSON.stringify(
+			{
+				version: 1,
+				host: HOST_TAG,
+				savedAt: new Date().toISOString(),
+				overrides: Object.fromEntries(anchorOverrides),
+			},
+			null,
+			"\t",
+		)}\n`,
+		"utf8",
+	);
+	return anchorOverrides.size;
+}
+
+/**
+ * 找出「宿主有、我们不认识」的段头 —— 它们是上游改名的候选。
+ *
+ * 只报两类（避免把 `# 1. Scope` 这种段内小标题全列出来）：
+ *   - `§ xxx` 前缀（omp 的顶层段头标记）
+ *   - 不带序号的 `# xxx`（如 `# Engineering`、`# Tool Inventory`）
+ */
+function listUnknownHeaders(text: string): Array<{ line: string; lineNo: number; scope: "static" | "footer" }> {
+	const known = new Set<string>();
+	for (const cut of CUTS) {
+		const { start } = effectiveCut(cut);
+		for (const marker of start) {
+			if (marker === "\u0000PREAMBLE") continue;
+			known.add(marker);
+		}
+	}
+
+	const out: Array<{ line: string; lineNo: number; scope: "static" | "footer" }> = [];
+	const lines = text.split("\n");
+	for (let i = 0; i < lines.length; i += 1) {
+		const line = lines[i].trimStart();
+		if (line.startsWith("§ ")) {
+			if (!known.has(line.trim())) out.push({ line: line.trim(), lineNo: i, scope: "static" });
+			continue;
+		}
+		if (line.startsWith("# ") && !/^# \d+\./.test(line)) {
+			if (!known.has(line.trim())) out.push({ line: line.trim(), lineNo: i, scope: "static" });
+		}
+	}
+	return out;
+}
 
 /**
  * 判断某一行是否是「别的 cut」的起始标记。
  * 用于兄弟护栏：本项扫描结束标记时，一旦先碰到别人的段头，就说明本项的范围已经越界。
+ *
+ * 比较用 cut id（不用数组引用），因为锚点可能被 reanchor 换成新数组。
  */
-function isOtherCutStart(line: string, ownStart: string[]): boolean {
+function isOtherCutStart(line: string, ownId: string | null): boolean {
 	for (const cut of CUTS) {
-		if (cut.start === ownStart) continue;
-		if (cut.start[0] === "\u0000PREAMBLE") continue;
-		for (const marker of cut.start) {
+		if (cut.id === ownId) continue;
+		const { start } = effectiveCut(cut);
+		for (const marker of start) {
+			if (marker === "\u0000PREAMBLE") continue;
 			if (line.startsWith(marker)) return true;
 		}
 	}
@@ -269,7 +406,8 @@ function removeSpan(
 	endMarkers: string[] | null,
 	consumeEnd = false,
 	siblingGuard = false,
-): { text: string; matched: boolean } {
+	ownId: string | null = null,
+): { text: string; matched: boolean; guarded?: boolean } {
 	const lines = text.split("\n");
 	const startsAt = lines.findIndex(line => startMarkers.some(m => line.trimStart().startsWith(m)));
 
@@ -284,6 +422,9 @@ function removeSpan(
 
 	let endsAt = lines.length;
 	let foundEnd = endMarkers === null; // end === null 是声明式的「切到块末尾」
+	// 靠兄弟护栏收边（不是命中自己的结束锚点）：边界仍是可信的，但可能连带吃掉了
+	// 本项结束后、下一段之前的上游新增段落 —— 状态要如实标成 guarded，不能报 applied。
+	let guarded = false;
 	if (endMarkers) {
 		for (let i = startsAt + 1; i < lines.length; i += 1) {
 			const line = lines[i].trimStart();
@@ -294,9 +435,10 @@ function removeSpan(
 				break;
 			}
 			// 兄弟护栏：先撞到别的段的起点，说明本段的范围已经越界了。
-			if (siblingGuard && isOtherCutStart(line, startMarkers)) {
+			if (siblingGuard && isOtherCutStart(line, ownId)) {
 				endsAt = i;
 				foundEnd = true;
+				guarded = true;
 				break;
 			}
 		}
@@ -313,7 +455,7 @@ function removeSpan(
 	while (tail.length > 0 && tail[0].trim() === "") tail.shift();
 
 	const kept = [...head, ...tail];
-	return { text: kept.length > 0 ? `${kept.join("\n")}\n` : "", matched: true };
+	return { text: kept.length > 0 ? `${kept.join("\n")}\n` : "", matched: true, guarded };
 }
 
 /** 对一段文本按启用的 cut 依次切除，返回结果与逐项状态（只处理指定 scope 的 cut）。 */
@@ -331,15 +473,17 @@ function applyCuts(
 			status[cut.id] = "skipped";
 			continue;
 		}
+		const { start, end } = effectiveCut(cut);
 		const result = removeSpan(
 			out,
-			cut.start,
-			cut.end,
+			start,
+			end,
 			cut.consumeEnd === true,
 			cut.siblingGuard !== false,
+			cut.id,
 		);
 		out = result.text;
-		status[cut.id] = result.matched ? "applied" : "unmatched";
+		status[cut.id] = result.matched ? (result.guarded ? "guarded" : "applied") : "unmatched";
 	}
 
 	return { text: out.trim().length > 0 ? out : "", status };
@@ -371,6 +515,10 @@ let fellBackToEmbedded = false;
 /** 用户在模式默认之外的手动开关：id → true(切) / false(保留)。 */
 const cutOverrides = new Map<string, boolean>();
 let lastRun: LastRun | null = null;
+/** 上一次见到的原始提示词（供 /purge doctor 与未知段头探测用），不落盘。 */
+let lastPrompt: { static: string; footer: string } | null = null;
+/** 工具裁剪：omp 原生工具的完整名字表（首次裁剪时记下，用于还原）。 */
+let toolsBeforeTrim: string[] | null = null;
 
 function resetSessionState(): void {
 	enabled = false;
@@ -383,6 +531,7 @@ function resetSessionState(): void {
 	fellBackToEmbedded = false;
 	cutOverrides.clear();
 	lastRun = null;
+	// 注意：anchorOverrides 不清 —— 它是跨会话的兼容层，只由 reanchor reset 清。
 }
 
 /** 读取人设正文；失败时不抛错，只记 loadError 并返回 false。 */
@@ -451,18 +600,62 @@ function paint(ctx: Ctx): void {
 // ============================================================================
 
 export default function ompPurge(pi: ExtApi) {
+	// 可选能力：宿主不提供就静默跳过（老版本 omp 仍能跑核心提示词层）
+	try {
+		pi.setLabel?.("omp-purge");
+	} catch {
+		/* 忽略 */
+	}
+
+	// CLI flag（等价于环境变量，但可被 --flag 覆盖；两者都给时 flag 优先）
+	try {
+		pi.registerFlag?.("purge-mode", {
+			description: "omp-purge 启动模式：strict | replace | append",
+			type: "string",
+		});
+		pi.registerFlag?.("purge-on", {
+			description: "omp-purge 启动即开启（等价 OMP_PURGE_AUTOSTART=1）",
+			type: "boolean",
+			default: false,
+		});
+		pi.registerFlag?.("purge-source", {
+			description: "omp-purge 人设文件绝对路径（等价 OMP_PURGE_SOURCE）",
+			type: "string",
+		});
+	} catch {
+		/* 宿主不支持 flag 时忽略 */
+	}
+
+	const bootstrap = (): void => {
+		// flag 优先于环境变量；都没有则用内置默认。
+		const flagMode = String(pi.getFlag?.("purge-mode") ?? "").trim().toLowerCase();
+		const flagSource = String(pi.getFlag?.("purge-source") ?? "").trim();
+		const flagOn = pi.getFlag?.("purge-on");
+
+		if (flagMode === "strict" || flagMode === "replace" || flagMode === "append") mode = flagMode;
+		if (flagSource) source = flagSource;
+
+		const autostart = flagOn === true || ENV_AUTOSTART;
+		resetSessionState();
+		// resetSessionState 会覆盖 mode/source，这里重新落在 flag 值上。
+		if (flagMode === "strict" || flagMode === "replace" || flagMode === "append") mode = flagMode;
+		if (flagSource) source = flagSource;
+
+		loadAnchorOverrides();
+		reload();
+		if (autostart && body.length > 0) enabled = true;
+	};
+
 	// 每个会话独立：新会话 / 恢复会话 / 切换会话 / 热重载都从「关闭」开始
 	pi.on("session_start", async (_event, ctx) => {
-		resetSessionState();
-		reload();
-		if (ENV_AUTOSTART && body.length > 0) enabled = true;
+		toolsBeforeTrim = null;
+		bootstrap();
 		paint(ctx);
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
-		resetSessionState();
-		reload();
-		if (ENV_AUTOSTART && body.length > 0) enabled = true;
+		toolsBeforeTrim = null;
+		bootstrap();
 		paint(ctx);
 	});
 
@@ -486,6 +679,8 @@ export default function ompPurge(pi: ExtApi) {
 
 		const staticBlocks = blocks.slice(0, footerStart);
 		const footerBlocks = blocks.slice(footerStart);
+		// 留一份原始文本供 /purge doctor 探测未知段头（内存，不落盘）
+		lastPrompt = { static: staticBlocks.join("\n\n"), footer: footerBlocks.join("\n\n") };
 		const persona = body.trim();
 		const active = activeCuts(mode);
 
@@ -540,7 +735,19 @@ export default function ompPurge(pi: ExtApi) {
 	pi.registerCommand?.("purge", {
 		description: "会话级提示词开关：清掉宿主脚手架段落并挂上自己的人设（仅本会话，不落盘）",
 		getArgumentCompletions: (prefix: string) => {
-			const values = ["on", "off", "status", "mode", "source", "cut", "preview", "reload"];
+			const values = [
+				"on",
+				"off",
+				"status",
+				"mode",
+				"source",
+				"cut",
+				"preview",
+				"reload",
+				"doctor",
+				"reanchor",
+				"tools",
+			];
 			return values.filter(value => value.startsWith(prefix)).map(value => ({ value, label: value }));
 		},
 		handler: async (args: string, ctx: Ctx) => {
@@ -593,17 +800,25 @@ export default function ompPurge(pi: ExtApi) {
 					lastRun === null
 						? "尚未跑过一轮"
 						: `${new Date(lastRun.at).toLocaleTimeString()} 静态块 ${lastRun.staticBlocks} → footer ${lastRun.footerBlocks} → 输出 ${lastRun.outBlocks} 块`;
-				const applied = lastRun
-					? Object.values(lastRun.status).filter(v => v === "applied").length
-					: 0;
-				const unmatched = lastRun
-					? Object.values(lastRun.status).filter(v => v === "unmatched").length
-					: 0;
+				const tally = (want: CutStatus) =>
+					lastRun ? Object.values(lastRun.status).filter(v => v === want).length : 0;
+				const applied = tally("applied");
+				const guarded = tally("guarded");
+				const unmatched = tally("unmatched");
 				return [
 					`状态: ${enabled ? "开启" : "关闭"}（仅本会话）  模式: ${modeLabel}`,
 					`人设: ${srcLabel}  ${body.length > 0 ? `${body.length} 字符` : `未加载${loadError ? `（${loadError}）` : ""}`}`,
 					`上轮: ${run}`,
-					lastRun ? `切除: applied ${applied} / unmatched ${unmatched} / skipped ${CUTS.length - applied - unmatched}` : "",
+					lastRun
+						? [
+								`切除: applied ${applied} / guarded ${guarded} / unmatched ${unmatched} / skipped ${CUTS.length - applied - guarded - unmatched}`,
+								guarded > 0
+									? "  注意: guarded = 靠相邻段头收边，未命中自身结束锚点；可能连带切掉上游新增段落。用 /purge doctor 看重锚建议。"
+									: "",
+							]
+								.filter(Boolean)
+								.join("\n")
+						: "",
 					"切除表:",
 					cutTable(mode),
 				]
@@ -736,9 +951,208 @@ export default function ompPurge(pi: ExtApi) {
 					);
 				}
 
+				case "doctor": {
+					// 锚点健康检查（对应 dsh-purge 的 selfcheck.js）
+					if (!lastPrompt) {
+						return notify(
+							"还没有见过提示词，无法体检。先发一轮对话（/purge on 后随便问一句），或 /purge preview。",
+							"error",
+						);
+					}
+					const lines: string[] = [`锚点体检（宿主 ${HOST_TAG}）`];
+					const text = lastPrompt.static;
+					let healthy = 0;
+					for (const cut of CUTS) {
+						if ((cut.scope ?? "static") !== "static") continue;
+						const { start } = effectiveCut(cut);
+						if (start[0] === "\u0000PREAMBLE") {
+							lines.push(`  ok        ${cut.id.padEnd(14)} （首部哨兵，恒可用）`);
+							healthy += 1;
+							continue;
+						}
+						const hit = start.some(m => text.split("\n").some(l => l.trimStart().startsWith(m)));
+						const reanchored = anchorOverrides.has(cut.id) ? " [已重锚]" : "";
+						lines.push(
+							`  ${hit ? "ok      " : "MISS    "} ${cut.id.padEnd(14)} ${start.join(" | ")}${reanchored}`,
+						);
+						if (hit) healthy += 1;
+					}
+					const total = CUTS.filter(c => (c.scope ?? "static") === "static").length;
+					lines.push(`静态侧: ${healthy}/${total} 命中`);
+
+					const unknown = listUnknownHeaders(text);
+					if (unknown.length > 0) {
+						lines.push("", "宿主里有我们不认识的段头（可能是上游改名）:");
+						for (const item of unknown.slice(0, 20)) {
+							lines.push(`  L${item.lineNo}  ${item.line}`);
+						}
+						if (unknown.length > 20) lines.push(`  …另有 ${unknown.length - 20} 条`);
+						lines.push("", "重锚示例: /purge reanchor WORKFLOW start <上面某个段头>");
+					}
+					return notify(lines.join("\n"), healthy === total ? "info" : "warning");
+				}
+
+				case "reanchor": {
+					const sub = (rest[0] ?? "").toLowerCase();
+
+					if (sub === "reset") {
+						anchorOverrides.clear();
+						try {
+							if (existsSync(ANCHORS_PATH)) rmSync(ANCHORS_PATH, { force: true });
+						} catch {
+							/* 删不掉也不影响内存已清 */
+						}
+						return notify("已清空全部重锚（内存 + 落盘文件），回到内置锚点。");
+					}
+
+					if (sub === "save") {
+						if (anchorOverrides.size === 0) {
+							return notify("当前没有重锚可保存。", "error");
+						}
+						try {
+							mkdirSync(dirname(ANCHORS_PATH), { recursive: true });
+							const n = saveAnchorOverrides();
+							return notify(`已把 ${n} 条重锚写入 ${ANCHORS_PATH}`);
+						} catch (error) {
+							return notify(
+								`写盘失败: ${error instanceof Error ? error.message : String(error)}`,
+								"error",
+							);
+						}
+					}
+
+					if (sub === "list" || sub === "") {
+						if (anchorOverrides.size === 0) {
+							return notify(`当前没有重锚。\n落盘路径: ${ANCHORS_PATH}`);
+						}
+						const rows = [...anchorOverrides.entries()].map(([id, ov]) => {
+							const start = ov.start?.join(" | ") ?? "(内置)";
+							const end = ov.end === undefined ? "(内置)" : ov.end === null ? "(切到块末尾)" : ov.end.join(" | ");
+							return `  ${id.padEnd(14)} start=${start}  end=${end}`;
+						});
+						return notify([`重锚 ${anchorOverrides.size} 条:`, ...rows, `落盘路径: ${ANCHORS_PATH}`].join("\n"));
+					}
+
+					// /purge reanchor <ID> start|end <marker...>
+					const id = (rest[0] ?? "").toUpperCase();
+					const slot = (rest[1] ?? "").toLowerCase();
+					const marker = rest.slice(2).join(" ").trim();
+
+					if (!CUT_BY_ID.has(id)) {
+						return notify(
+							[
+								"用法:",
+								"  /purge reanchor <ID> start <段头标记>",
+								"  /purge reanchor <ID> end <段头标记>",
+								"  /purge reanchor <ID> end-to-block",
+								"  /purge reanchor list | save | reset",
+								`可用 ID: ${CUT_IDS.join(", ")}`,
+							].join("\n"),
+							"error",
+						);
+					}
+
+					const cut = CUT_BY_ID.get(id)!;
+					const current = anchorOverrides.get(id) ?? { at: new Date().toISOString(), host: HOST_TAG };
+
+					if (slot === "start") {
+						if (!marker) return notify("缺少起始标记。用法: /purge reanchor " + id + " start <段头>", "error");
+						anchorOverrides.set(id, { ...current, start: [marker], at: new Date().toISOString(), host: HOST_TAG });
+						return notify(
+							`已把 ${id} 的起始锚点重锚为 "${marker}"（仅本会话）。\n/purge reanchor save 可持久化。\n${cutTable(mode)}`,
+						);
+					}
+
+					if (slot === "end") {
+						if (marker === "end-to-block") {
+							anchorOverrides.set(id, { ...current, end: null, at: new Date().toISOString(), host: HOST_TAG });
+							return notify(`已把 ${id} 的结束锚点设为「切到块末尾」（仅本会话）。`);
+						}
+						if (!marker) return notify(`缺少结束标记。用法: /purge reanchor ${id} end <段头>`, "error");
+						anchorOverrides.set(id, { ...current, end: [marker], at: new Date().toISOString(), host: HOST_TAG });
+						return notify(
+							`已把 ${id} 的结束锚点重锚为 "${marker}"（仅本会话）。\n${cutTable(mode)}`,
+						);
+					}
+
+					// 只给 ID 不给槽位 → 显示该项当前锚点
+					const eff = effectiveCut(cut);
+					return notify(
+						[
+							`${id}: ${cut.label}`,
+							`  start: ${eff.start.join(" | ")}${anchorOverrides.has(id) ? "  [已重锚]" : ""}`,
+							`  end  : ${eff.end === null ? "(切到块末尾)" : eff.end.join(" | ")}`,
+						].join("\n"),
+					);
+				}
+
+				case "tools": {
+					// 工具裁剪（对应 dsh-purge 的 MINIMAL_OFFICIAL_TOOLSET）
+					const sub = (rest[0] ?? "").toLowerCase();
+					if (!pi.setActiveTools || !pi.getActiveTools) {
+						return notify("当前 omp 版本没有暴露 setActiveTools，无法裁剪工具。", "error");
+					}
+					const current = pi.getActiveTools();
+					if (sub === "" || sub === "list") {
+						const all = pi.getAllTools?.().map(t => t.name) ?? [];
+						const off = all.filter(name => !current.includes(name));
+						return notify(
+							[
+								`当前启用 ${current.length} 个工具: ${current.join(", ")}`,
+								off.length > 0 ? `未启用 ${off.length} 个: ${off.join(", ")}` : "",
+								"",
+								"用法: /purge tools keep a,b,c    只留这几个（其余全部停用）",
+								"      /purge tools drop a,b     停用这几个",
+								"      /purge tools reset        还原到首次裁剪前的集合",
+								"注意: 裁剪在下一轮生效；不要在 before_agent_start 里调用 setActiveTools（会触发宿主重排准备链）。",
+							]
+								.filter(Boolean)
+								.join("\n"),
+						);
+					}
+
+					if (sub === "reset") {
+						if (!toolsBeforeTrim) return notify("没有裁剪记录可还原。", "error");
+						await pi.setActiveTools(toolsBeforeTrim);
+						const restored = toolsBeforeTrim.length;
+						toolsBeforeTrim = null;
+						return notify(`已还原到 ${restored} 个工具。`);
+					}
+
+					const names = rest
+						.slice(1)
+						.join(" ")
+						.split(/[,\s]+/)
+						.map(s => s.trim())
+						.filter(Boolean);
+
+					if (names.length === 0) {
+						return notify(`缺少工具名。用法: /purge tools ${sub} <name[,name...]>`, "error");
+					}
+
+					const all = pi.getAllTools?.().map(t => t.name) ?? current;
+					const unknownNames = names.filter(name => !all.includes(name));
+					if (unknownNames.length > 0) {
+						return notify(`未知工具: ${unknownNames.join(", ")}\n可用: ${all.join(", ")}`, "error");
+					}
+
+					const next =
+						sub === "keep"
+							? all.filter(name => names.includes(name))
+							: current.filter(name => !names.includes(name));
+
+					if (next.length === 0) {
+						return notify("结果为空集合，拒绝执行（会把所有工具都停掉）。", "error");
+					}
+
+					if (!toolsBeforeTrim) toolsBeforeTrim = [...current];
+					await pi.setActiveTools(next);
+					return notify(`已把启用工具设为 ${next.length} 个: ${next.join(", ")}`);
+				}
+
 				default:
 					return notify(
-						`未知子命令: ${cmd}\n用法: /purge [on|off|status|mode|source|cut|preview|reload]`,
+						`未知子命令: ${cmd}\n用法: /purge [on|off|status|mode|source|cut|preview|reload|doctor|reanchor|tools]`,
 						"error",
 					);
 			}
@@ -747,4 +1161,19 @@ export default function ompPurge(pi: ExtApi) {
 }
 
 // 供测试直接复用纯函数（不影响 omp 加载时的默认导出）
-export { applyCuts, activeCuts, removeSpan, CUTS, CUT_IDS, isFooterBlock, EMBEDDED_PERSONA, DEFAULT_SOURCE };
+export {
+	applyCuts,
+	activeCuts,
+	removeSpan,
+	CUTS,
+	CUT_IDS,
+	isFooterBlock,
+	EMBEDDED_PERSONA,
+	DEFAULT_SOURCE,
+	effectiveCut,
+	listUnknownHeaders,
+	loadAnchorOverrides,
+	anchorOverrides,
+	ANCHORS_PATH,
+	HOST_TAG,
+};
