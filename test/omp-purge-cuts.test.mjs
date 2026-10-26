@@ -141,6 +141,44 @@ const { CUTS, CUT_IDS, applyCuts, removeSpan, isFooterBlock } = mod;
 }
 
 {
+	// 护栏按作用域隔离（回归）：footer 的 <critical> 起始锚点也会出现在 static 块内部
+	// —— omp 18.12.6 的 § Tool Policy 段里就有两对。若护栏不比较 scope，static 的 cut
+	// 会被 footer 的 cut 提前收边：该切的内容（# Exploration / # AST / # Delegation）
+	// 留在原地，状态还谎报 guarded。v0.2.0 首发版本正是这个 bug。
+	const staticText = [
+		"§ Tool Policy",
+		"# General",
+		"- narrow tools",
+		"<critical>",
+		"- static hard rule",
+		"</critical>",
+		"# Exploration",
+		"- explore first",
+		"# Delegation",
+		"- delegate reads",
+		"§ Workflow",
+		"# 1. Scope",
+		"§ Delivery",
+	].join("\n");
+
+	const r = applyCuts(staticText, new Set(["TOOL_POLICY"]), "static");
+	assert.equal(
+		r.status.TOOL_POLICY,
+		"applied",
+		"静态 <critical> 不能替 TOOL_POLICY 收边；结束锚点 § Workflow 就在后面",
+	);
+	assert.ok(!r.text.includes("# Exploration"), "# Exploration 应随 TOOL_POLICY 一起切掉");
+	assert.ok(!r.text.includes("# Delegation"), "# Delegation 应随 TOOL_POLICY 一起切掉");
+	assert.ok(r.text.includes("§ Workflow"), "§ Workflow 是结束锚点，应留给下一段");
+
+	// 同一段文本交给 footer 作用域：只吃 <critical> 那一对，不动 static 子段
+	const f = applyCuts(staticText, new Set(["FOOTER_CRITICAL"]), "footer");
+	assert.equal(f.status.FOOTER_CRITICAL, "applied");
+	assert.ok(!f.text.includes("<critical>"), "footer 作用域切掉 <critical> 块");
+	assert.ok(f.text.includes("# Exploration"), "footer 作用域不动 static 子段");
+}
+
+{
 	// footer 作用域隔离：static 轮次绝不能碰 footer 的 cut
 	const footer = ["<project-context>", "rules", "</project-context>", "<critical>", "hard", "</critical>"].join("\n");
 	const outStatic = applyCuts(footer, new Set(CUT_IDS), "static");

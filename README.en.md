@@ -216,6 +216,12 @@ found. When either is absent:
 A sibling guard backs this up: while scanning for an end marker, hitting any *other* cut's start
 marker ends the span there. So a renamed heading costs you one cut, not the rest of the document.
 
+The guard is **scoped**: footer's `<critical>` and static's `§ Critical` are different things.
+omp 18.12.6's `§ Tool Policy` section contains two inline `<critical>` pairs, so an unscoped
+comparison snapped the span at the footer anchor instead of `§ Workflow` — leaving
+`# Exploration` / `# AST` / `# Delegation` behind and mislabelling the cut `guarded`. That is what
+v0.2.1 fixes.
+
 **Ending a span at a sibling reports `guarded`, not `applied`.** This is the fourth state and the
 easiest one to miss: the boundary is safe (nothing ate through), but the cut **did not find its own
 end anchor** — everything between where it actually ends and the next sibling heading gets removed,

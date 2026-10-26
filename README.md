@@ -204,6 +204,11 @@ omp --purge-mode=replace --purge-source=/path/to/persona.md
 另有一层兄弟护栏：扫描结束标记的途中一旦撞到**别的 cut 的起始标记**，就在那里收边。
 所以一个标题被改名，代价是丢一项，不是丢掉后面整篇。
 
+护栏只在**同一作用域内**生效：footer 的 `<critical>` 和 static 的 `§ Critical` 是两回事。
+omp 18.12.6 的 `§ Tool Policy` 段内部就有两对 `<critical>`，跨作用域比较会让这一项在
+`§ Workflow` 之前就被 footer 的锚点收边 —— 结果是 `# Exploration`／`# AST`／`# Delegation`
+本该一起切掉却留了下来，状态还谎报 `guarded`。v0.2.1 修的是这个。
+
 **靠兄弟护栏收边时报 `guarded`，不报 `applied`。** 这是第四种状态，也是最容易被忽略的一种：
 边界是安全的（没有吃穿），但它**没有命中自己的结束锚点** —— 从本段结束到下一个兄弟段头之间的
 内容，包括上游新增的、我们不认识的段，都被一起切掉了。状态表必须把这件事说出来，否则又是一次

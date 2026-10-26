@@ -387,9 +387,17 @@ function listUnknownHeaders(text: string): Array<{ line: string; lineNo: number;
  *
  * 比较用 cut id（不用数组引用），因为锚点可能被 reanchor 换成新数组。
  */
-function isOtherCutStart(line: string, ownId: string | null): boolean {
+function isOtherCutStart(
+	line: string,
+	ownId: string | null,
+	scope: "static" | "footer" = "static",
+): boolean {
 	for (const cut of CUTS) {
 		if (cut.id === ownId) continue;
+		// 护栏只在同一作用域内生效：footer 的 <critical> 与 static 的 § Critical
+		// 是两回事。跨作用域比较会让「本段应到 § Workflow」被同名的 </critical>
+		// 之类的父级标记提前收边，把整段内容留在原地还谎报 guarded。
+		if ((cut.scope ?? "static") !== scope) continue;
 		const { start } = effectiveCut(cut);
 		for (const marker of start) {
 			if (marker === "\u0000PREAMBLE") continue;
@@ -407,6 +415,7 @@ function removeSpan(
 	consumeEnd = false,
 	siblingGuard = false,
 	ownId: string | null = null,
+	scope: "static" | "footer" = "static",
 ): { text: string; matched: boolean; guarded?: boolean } {
 	const lines = text.split("\n");
 	const startsAt = lines.findIndex(line => startMarkers.some(m => line.trimStart().startsWith(m)));
@@ -435,7 +444,7 @@ function removeSpan(
 				break;
 			}
 			// 兄弟护栏：先撞到别的段的起点，说明本段的范围已经越界了。
-			if (siblingGuard && isOtherCutStart(line, ownId)) {
+			if (siblingGuard && isOtherCutStart(line, ownId, scope)) {
 				endsAt = i;
 				foundEnd = true;
 				guarded = true;
@@ -481,6 +490,7 @@ function applyCuts(
 			cut.consumeEnd === true,
 			cut.siblingGuard !== false,
 			cut.id,
+			scope,
 		);
 		out = result.text;
 		status[cut.id] = result.matched ? (result.guarded ? "guarded" : "applied") : "unmatched";
