@@ -1,6 +1,6 @@
 {
   "name": "omp-purge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "omp extension: session-level system-prompt switch — cuts host scaffolding sections (identity, tool policy, workflow) and mounts your own persona, with a per-section applied/unmatched/skipped status table",
   "type": "module",
   "license": "MIT",
@@ -26,7 +26,7 @@
     "extensions",
     "test",
     "README.md",
-    "README.zh-CN.md",
+    "README.en.md",
     "LICENSE"
   ],
   "publishConfig": {

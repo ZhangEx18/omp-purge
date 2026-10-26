@@ -1,118 +1,123 @@
 # omp-purge
 
-Session-level system-prompt switch for [omp](https://github.com/oh-my-pi/omp). One TypeScript
-file, no host patching, no files written — `/purge` swaps omp's static instruction block for
-your own persona, `/purge off` puts omp back exactly as it was.
+**中文** · [English](README.en.md)
 
-Lineage:
+给 [omp](https://github.com/oh-my-pi/omp) 用的会话级系统提示词开关。一个 TypeScript 文件，
+不改宿主、不写盘 —— `/purge` 把 omp 的静态指令块换成你自己的人设，`/purge off` 原样还回去。
 
-- **[dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)** — the idea that you *clear* the
-  host identity instead of arguing with it, plus the per-item patch state machine
-  (`applied` / `unmatched` / `skipped` with a detail table).
-- **[pi-purge](https://github.com/ZiChuanLan/pi-purge)** — the shape: a single extension, a
-  session-scoped in-memory switch, three modes, safe degradation when an anchor no longer matches,
-  zero disk writes.
+血统两条：
 
-## Why omp needs its own version
+- **[dsh-purge](https://github.com/kingcharleslzy-ai/dsh-purge)** —— 「不跟宿主身份讲道理，直接清掉」
+  这个思路，以及逐项状态机（`applied` / `unmatched` / `skipped` 三态 + 明细表）。
+- **[pi-purge](https://github.com/ZiChuanLan/pi-purge)** —— 形态：单扩展、会话级内存开关、三模式、
+  锚点失配就安全退化、零落盘。
 
-omp ships as a single compiled Bun binary. There is no `lib/core.js` to patch, no approval layer to
-rewrite — `dsh-purge`'s host-patching engine has nothing to grab onto. What omp *does* expose is
-`before_agent_start`, which hands the extension the prompt as an **ordered block array**:
+## 为什么 omp 要单独写一个
+
+omp 是 bun 编译的单文件二进制，没有 `lib/core.js` 可 patch，没有审批层可改写 —— dsh-purge 那套
+宿主补丁引擎在 omp 上没有着力点。omp 真正开放的是 `before_agent_start`，它把提示词作为
+**有序 block 数组**交出来：
 
 ```
-systemPrompt[0]  → static instruction block (112 KB in omp 18.12.6)
-systemPrompt[1]  → <project-context> footer (your AGENTS.md, repo rules, workspace tree, MCP routes)
+systemPrompt[0]  → 静态指令块（omp 18.12.6 实测 112 KB）
+systemPrompt[1]  → <project-context> footer（你的 AGENTS.md、repo rules、workspace tree、MCP 路由）
 ```
 
-So omp-purge cuts **by block and by section**, not with pi-purge's single-string surgery. The split
-is also where the cache breakpoint lives, which is why `strict` can throw away the harness scaffold
-and still keep your own repo rules in the cache-stable tail.
+所以 omp-purge 是**按块 + 按段**切除，不是 pi-purge 那种单串手术。这个分块点同时也是缓存断点所在
+—— 这就是为什么 `strict` 能丢掉宿主脚手架、却仍然把你自己仓库的规则留在缓存稳定的尾部。
 
-## Install
+## 安装
 
-Copy (or symlink) the extension into omp's user extension directory:
+三条路，按「你想不想改源码」选。
 
-```bash
-mkdir -p ~/.omp/agent/extensions
-ln -sf "$PWD/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
+### A. 软链一份 checkout（作者本人用的）
+
+```sh
+git clone https://github.com/ZhangEx18/omp-purge
+ln -sf "$PWD/omp-purge/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
 ```
 
-Or load it for one run only:
+更新就是 `git pull` —— 软链指向工作区，下一个 omp 会话直接读到新代码。没有安装步骤，没有缓存要清。
 
-```bash
+### B. `omp plugin install`（机器上不留 checkout）
+
+```sh
+omp plugin install https://github.com/ZhangEx18/omp-purge
+omp plugin list            # omp-purge@<version>，enabled: true
+```
+
+它通过 Bun 把仓库解析到 `~/.omp/plugins/node_modules/omp-purge`，并登记进 `omp-plugins.lock.json`。
+扩展入口读的是 `package.json` 里的 `omp.extensions`（同时也声明了 `pi.extensions`）。
+
+### C. 只给某一次运行加载
+
+```sh
 omp -e /absolute/path/to/extensions/omp-purge.ts
 ```
 
-Or install it as a package (the manifest declares both `omp.extensions` and `pi.extensions`):
+注意：`--plugin-dir` **不加载**扩展模块，它加载的是插件包目录。用 `-e`、扩展发现目录，或
+`omp plugin link`。
 
-```bash
-omp plugin link /absolute/path/to/omp-purge
-```
+要求 omp ≥ 18。跑测试需要 Node ≥ 22.19（原生 TypeScript 类型剥离）。
 
-`--plugin-dir` does **not** load extension modules — it loads plugin package directories. Use `-e`,
-a discovered extension directory, or `omp plugin link`.
+## 用法
 
-Requires omp ≥ 18. Node ≥ 22.19 for the test suite (native TypeScript type-stripping).
+不输入 `/purge` 就完全关闭。在那之前你的 omp 会话跟没装这个扩展一模一样。
 
-## Usage
-
-`/purge` is off until you turn it on. Nothing changes in your omp session until then.
-
-| Command | Effect |
+| 命令 | 作用 |
 | --- | --- |
-| `/purge` | toggle on/off |
-| `/purge on` / `off` | explicit on/off |
-| `/purge status` | state, mode, persona source, last run, per-cut detail table |
-| `/purge mode strict\|replace\|append` | switch mode |
-| `/purge source <abs-path\|embedded>` | point at a persona file, or back to the built-in example |
-| `/purge reload` | re-read the current persona file |
-| `/purge cut <ID> cut\|keep` | override one cut for the current mode |
-| `/purge cut reset` | drop all overrides |
-| `/purge preview` | show the first 400 characters that will be sent |
+| `/purge` | 切换开/关 |
+| `/purge on` / `off` | 显式开/关 |
+| `/purge status` | 状态、模式、人设来源、上一轮、逐项切除明细表 |
+| `/purge mode strict\|replace\|append` | 切模式 |
+| `/purge source <绝对路径\|embedded>` | 换人设文件，或切回内置示例 |
+| `/purge reload` | 重读当前人设文件 |
+| `/purge cut <ID> cut\|keep` | 在当前模式下单独覆盖某一项 |
+| `/purge cut reset` | 清空所有手动覆盖 |
+| `/purge preview` | 看将要发送的前 400 字符 |
 
-### Modes
+### 三模式
 
-| Mode | Static block | Footer (`<project-context>`) | Use when |
+| 模式 | 静态块 | Footer（`<project-context>`） | 适用 |
 | --- | --- | --- | --- |
-| `strict` (default) | dropped entirely; replaced with `Current working directory: <cwd>` + persona | kept, minus omp's own `<critical>` tail | you want only your own instructions plus your repo's rules |
-| `replace` | identity cuts removed, tool policy / workflow kept | kept | you want your own role without losing omp's operating procedure |
-| `append` | untouched | untouched; persona inserted as its own block after block 0 | you want an audit-friendly additive layer |
+| `strict`（默认） | 整段丢弃，换成 `Current working directory: <cwd>` + 人设 | 保留，只去掉 omp 自己的 `<critical>` 尾块 | 你只要自己的指令 + 自己仓库的规则 |
+| `replace` | 只清身份段，工具政策/工作流保留 | 保留 | 想要自己的角色，但不丢 omp 的作业流程 |
+| `append` | 一字不动 | 一字不动，人设作为独立块插在 block 0 之后 | 想要可审计的增量层 |
 
-### Persona source
+### 人设来源
 
-Resolved in this order:
+按这个顺序解析：
 
-1. `OMP_PURGE_SOURCE` environment variable
-2. `~/.dsh/prompt-inject.md` — shared with the dsh side of the same machine
-3. the built-in example text in `extensions/omp-purge.ts`
+1. `OMP_PURGE_SOURCE` 环境变量
+2. `~/.dsh/prompt-inject.md` —— 与本机 dsh 侧共用同一份注入文件
+3. `extensions/omp-purge.ts` 里的内置示例文本
 
-A missing **default** source falls back to the embedded example silently (so a fresh install works).
-A missing **explicitly named** source is an error and keeps the previously loaded body.
+**默认源**缺失会静默回退内置示例（保证新装即可用）；**显式指定**的路径缺失是错误，并保留上一份
+已加载正文。
 
-### Environment variables
+### 环境变量
 
-| Variable | Values | Meaning |
+| 变量 | 取值 | 含义 |
 | --- | --- | --- |
-| `OMP_PURGE_SOURCE` | path or `embedded` | initial persona source |
-| `OMP_PURGE_MODE` | `strict` \| `replace` \| `append` | initial mode |
-| `OMP_PURGE_AUTOSTART` | `1`/`true`/`yes`/`on` | start enabled each session |
+| `OMP_PURGE_SOURCE` | 路径或 `embedded` | 初始人设来源 |
+| `OMP_PURGE_MODE` | `strict` \| `replace` \| `append` | 初始模式 |
+| `OMP_PURGE_AUTOSTART` | `1`/`true`/`yes`/`on` | 每个会话自动开启 |
 
-Environment only seeds the initial state. Nothing is ever written back to `config.yml` or anywhere
-else on disk.
+环境变量只播种初始状态。任何东西都不会写回 `config.yml` 或磁盘上别的位置。
 
-## The cut table
+## 切除表
 
-Fourteen anchors, taken from the rendered text of omp 18.12.6's
-`src/prompts/system/system-prompt.md`. `strict` and `replace` differ only in which ones they enable.
+十四个锚点，取自 omp 18.12.6 `src/prompts/system/system-prompt.md` 渲染后的字面文本。
+`strict` 与 `replace` 的差别只在于启用哪几项。
 
-| ID | Section | Scope | `replace` | `strict` |
+| ID | 段落 | 作用域 | `replace` | `strict` |
 | --- | --- | --- | :-: | :-: |
-| `HOST_PREAMBLE` | RFC 2119 / XML-authority preamble | static | ✓ | ✓ |
+| `HOST_PREAMBLE` | RFC 2119 / XML 权威声明 | static | ✓ | ✓ |
 | `ROLE_SECTION` | `§ Role` + "You are omp's trusted coding assistant." | static | ✓ | ✓ |
-| `PERSONALITY` | `# Personality` (from `config.yml#personality`) | static | ✓ | ✓ |
+| `PERSONALITY` | `# Personality`（来自 `config.yml#personality`） | static | ✓ | ✓ |
 | `ENGINEERING` | `# Engineering` | static | | ✓ |
-| `SKILLS_RULES` | `# Skills & Rules` incl. `<skills>` | static | | ✓ |
-| `INTERNAL_URLS` | `# Internal URLs` (`omp://` doc index) | static | ✓ | ✓ |
+| `SKILLS_RULES` | `# Skills & Rules` 含 `<skills>` | static | | ✓ |
+| `INTERNAL_URLS` | `# Internal URLs`（`omp://` 文档目录） | static | ✓ | ✓ |
 | `TOOL_INVENTORY` | `# Tool Inventory` | static | ✓ | ✓ |
 | `XD_DEVICES` | `# xd:// Tool Devices` | static | ✓ | ✓ |
 | `SCRATCHPAD` | `§ Scratchpad` | static | | ✓ |
@@ -120,128 +125,94 @@ Fourteen anchors, taken from the rendered text of omp 18.12.6's
 | `WORKFLOW` | `§ Workflow` | static | | ✓ |
 | `DELIVERY` | `§ Delivery` | static | | ✓ |
 | `CRITICAL` | `§ Critical` | static | | ✓ |
-| `FOOTER_CRITICAL` | `<critical>` tail | footer | | ✓ |
+| `FOOTER_CRITICAL` | `<critical>` 尾块 | footer | | ✓ |
 
-`append` uses no cuts at all.
+`append` 不启用任何切除项。
 
-### Safe degradation
+### 安全退化
 
-Every anchor is matched by a line-level `startsWith` against the trimmed line — never by index,
-never by byte offset. A cut is only removed when **both** its start and its declared end marker are
-found. When either is absent:
+每个锚点都是行级 `startsWith` 对 `trimStart()` 后的行做匹配 —— 不靠行号、不靠字节偏移。
+只有**起始标记和声明的结束标记都找到**时，该项才真的被切除。缺任一个：
 
-- that single cut is reported `unmatched` in `/purge status`
-- the cut is skipped and its text is left byte-identical; the other cuts still run
-- the prompt is never truncated at a guessed boundary
+- 该项单独报 `unmatched`（`/purge status` 里看得到）
+- 该项跳过、文本一字节不动，其余项照常执行
+- 绝不在猜测的边界上截断提示词
 
-`end: null` is a separate, explicit declaration meaning "this section runs to the end of the block"
-(only `§ Critical` uses it). It is never inferred from a failed search.
+`end: null` 是**另一种显式声明**，意思是「本段一直到块末尾」（只有 `§ Critical` 这么写）。
+它绝不会由一次失败的搜索推断出来。
 
-A sibling guard backs this up: while scanning for an end marker, hitting any *other* cut's start
-marker ends the span there. So a renamed heading costs you one cut, not the rest of the document.
+另有一层兄弟护栏：扫描结束标记的途中一旦撞到**别的 cut 的起始标记**，就在那里收边。
+所以一个标题被改名，代价是丢一项，不是丢掉后面整篇。
 
-Two real examples:
+两个真实例子：
 
-- On an omp session without the `think` tool, `SCRATCHPAD` reports `unmatched  § Scratchpad` and
-  everything else applies. The state machine working as intended.
-- `omp` renames `§ Workflow` to `§ Process`: `TOOL_POLICY` and `WORKFLOW` go `unmatched`, and the
-  remaining ~100 KB of the block survives untouched. (v0.1.0 silently ate all of it down to 61
-  characters here — that is what the v0.1.1 fix addresses; see `test/omp-purge-cuts.test.mjs`.)
+- 没有 `think` 工具的 omp 会话里，`SCRATCHPAD` 报 `unmatched  § Scratchpad`，其他全部 applied。
+  状态机按设计工作。
+- `omp` 把 `§ Workflow` 改名成 `§ Process`：`TOOL_POLICY` 与 `WORKFLOW` 转 `unmatched`，
+  该块剩下的约 100 KB 原样保留。（v0.1.0 在这里会静默吃穿到只剩 61 字符 —— 这正是 v0.1.1
+  修掉的问题，回归测试见 `test/omp-purge-cuts.test.mjs`。）
 
-## Verify
+## 验证
 
 ```bash
 npm test
 ```
 
-`test/omp-purge-cuts.test.mjs` covers boundary semantics (open vs. closed spans, missing end
-markers, the preamble sentinel, scope isolation, empty-block collapse).
-`test/omp-purge.test.mjs` drives the real handler with an omp-18.12.6-shaped fixture: three modes,
-toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempotency.
+`test/omp-purge-cuts.test.mjs` 覆盖边界语义（开区间 vs 闭区间、结束标记缺失、preamble 哨兵、
+作用域隔离、切空后折叠）。`test/omp-purge.test.mjs` 用 omp 18.12.6 形状的夹具驱动真实 handler：
+三模式、toggle、`status`、`cut` 覆盖、`source` 切换、reload、回退、幂等。
 
-## Limits — read this before trusting it
+## 局限 —— 信任它之前请读这段
 
-- **Anchors are version-pinned, and that is a deliberate trade.** Three ways to find a section:
-  (a) by index/offset — cheapest, breaks catastrophically on any reformat;
-  (b) by semantic parse of the template — needs the template, not the rendered text, and pins you to
-  omp's internal rendering pipeline;
-  (c) by anchor text — survives reordering and body edits, breaks only when the heading itself is
-  renamed.
-  This extension picks (c), and makes the failure mode *visible and local*: a renamed heading costs
-  exactly one `unmatched` row in `/purge status`, and the sibling guard stops it from spreading.
-  Re-run `/purge status` after every omp upgrade. `unmatched` on `ROLE_SECTION` means "the host
-  identity is still there" — the one row you must never ignore.
-- **Tool schemas are not prompts.** Tools reach the model through the API `tools` parameter, not
-  through `systemPrompt`. No prompt-layer extension can remove a tool; use
-  `omp --no-extensions`, `setActiveTools`, or your omp tool config for that.
-- **The footer is yours, not omp's.** In `strict`, your `AGENTS.md`, `<repo-rules>`,
-  `<dir-context>`, `<workspace-tree>`, and the MCP routes still go out. The extension strips only
-  omp's own `<critical>` tail from that block; everything else in the footer is content you wrote.
-- **Not a security boundary.** This changes what the model is told, not what the process may do.
-  omp's permissions are your OS user's permissions. Isolation is a container/VM question.
-- **`strict` drops `# Tool Inventory`.** The tools remain callable; the model just is not told they
-  exist by name. If a tool-using session starts flailing after `/purge mode strict`, that is why.
+- **锚点绑定版本，这是刻意的取舍。** 定位一个段落有三条路：
+  (a) 靠行号/字节偏移 —— 最省事，任何一次重排都会灾难性失效；
+  (b) 语义解析模板 —— 要拿到模板而不是渲染后文本，而且把你焊死在 omp 的内部渲染管线上；
+  (c) 锚点文本 —— 能扛住段落重排和正文改写，只在标题本身被改名时失效。
+  本扩展选 (c)，并把失效做成**可见且局部**的：标题被改名，代价就是 `/purge status` 里多一行
+  `unmatched`，兄弟护栏阻止它扩散。每次升级 omp 之后重跑 `/purge status`。`ROLE_SECTION` 报
+  `unmatched` 就等于「宿主身份还在」—— 这一行绝不能忽略。
+- **工具 schema 不是提示词。** 工具通过 API `tools` 参数到达模型，不经过 `systemPrompt`。
+  任何提示词层扩展都删不掉一个工具；那要用 `omp --no-extensions`、`setActiveTools` 或你的
+  omp 工具配置。
+- **Footer 是你的，不是 omp 的。** `strict` 下你的 `AGENTS.md`、`<repo-rules>`、`<dir-context>`、
+  `<workspace-tree>`、MCP 路由照旧发出。扩展只从这一块里剥掉 omp 自己的 `<critical>` 尾块，
+  其余全是你写的内容。
+- **这不是安全边界。** 它改的是模型被告知什么，不是进程能做什么。omp 的权限就是你 OS 用户的
+  权限；隔离是容器/VM 层面的事。
+- **`strict` 会丢掉 `# Tool Inventory`。** 工具仍然可调用，只是模型不被按名字告知它们存在。
+  如果 `/purge mode strict` 之后带工具的会话开始乱撞，原因就在这。
 
-## License
-
-MIT. See [LICENSE](LICENSE).
-
-## Install
-
-Two ways in. Pick by whether you want to edit the source.
-
-### A. Symlink a checkout (what this repo's author uses)
+## 更新
 
 ```sh
-git clone https://github.com/ZhangEx18/omp-purge
-ln -sf "$PWD/omp-purge/extensions/omp-purge.ts" ~/.omp/agent/extensions/omp-purge.ts
-```
-
-Updates are `git pull` — the symlink points at the working tree, so the next omp session
-picks the new code up. No install step, no cache to clear.
-
-### B. `omp plugin install` (no checkout on the machine)
-
-```sh
-omp plugin install https://github.com/ZhangEx18/omp-purge
-omp plugin list            # omp-purge@<version>, enabled: true
-```
-
-This resolves the repo through Bun into `~/.omp/plugins/node_modules/omp-purge` and records it in
-`omp-plugins.lock.json`. The extension entry is read from `package.json` `omp.extensions`.
-
-## Update
-
-```sh
-# A: symlinked checkout
+# A：软链的 checkout
 cd omp-purge && git pull
 
-# B: plugin install
-omp plugin install https://github.com/ZhangEx18/omp-purge   # re-run install; it re-resolves HEAD
+# B：plugin install
+omp plugin install https://github.com/ZhangEx18/omp-purge   # 重跑 install，会重新解析 HEAD
 ```
 
-`omp plugin upgrade` only walks **marketplace** plugins (`name@marketplace`); a Git-URL install is
-recorded as an npm-style dependency, so `upgrade` reports "All marketplace plugins are up to date"
-and does nothing for it. Re-running `install` with the same URL is the update path.
+`omp plugin upgrade` 只遍历 **marketplace** 插件（`name@marketplace`）；用 Git URL 装进来的是
+npm 风格的依赖，`upgrade` 会回一句「All marketplace plugins are up to date」然后什么都不做。
+用同一个 URL 重跑 `install` 才是它的更新路径。
 
-Either way the new module only takes effect in a **new session**. Extension modules are imported
-once per process (with a `?mtime` cache-buster at load time), and `/reload-plugins` explicitly does
-not re-import extension modules — it refreshes skills, commands, hooks, tools, agents and MCP.
-Restart `omp`, or start a new session, to pick up new extension code.
+两条路都一样：新模块只在**新会话**里生效。扩展模块每进程只 import 一次（加载时带 `?mtime`
+缓存破坏），而 `/reload-plugins` 明确**不**重新 import 扩展模块 —— 它刷的是 skills、commands、
+hooks、tools、agents、MCP。要拿到新扩展代码，重启 `omp` 或开新会话。
 
-Check what is actually live inside the session:
+在会话里确认当前真正生效的是什么：
 
 ```
-/purge status      # mode, persona source, per-cut applied/unmatched/skipped
+/purge status      # 模式、人设源、逐项 applied/unmatched/skipped
 ```
 
-### Pin a specific revision
+### 锁定某个版本
 
 ```sh
 omp plugin install https://github.com/ZhangEx18/omp-purge#v0.1.1
 ```
 
-## Uninstall
+## 卸载
 
 ```sh
 # A
@@ -250,3 +221,7 @@ rm ~/.omp/agent/extensions/omp-purge.ts
 # B
 omp plugin uninstall omp-purge
 ```
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

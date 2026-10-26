@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+// 宿主环境可能已经设了 OMP_PURGE_*（例如作者本机把默认人设指到别处）。
+// 这些变量在模块加载时读取，所以必须在任何 import 之前清掉，否则用例之间会互相污染。
+for (const key of ["OMP_PURGE_SOURCE", "OMP_PURGE_MODE", "OMP_PURGE_AUTOSTART"]) {
+	delete process.env[key];
+}
+
 // --------------------------------------------------------------- 测试夹具
 // 取自 omp 18.12.6 在 `omp -p "say OK" -e dump-prompt.ts` 下真实渲染的
 // systemPrompt[0] / systemPrompt[1] 的段头骨架（正文压缩，行号与真实一致）。
