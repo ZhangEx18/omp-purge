@@ -122,14 +122,25 @@ omp plugin link /absolute/path/to/omp-purge
 ### 安全退化
 
 每个锚点都是行级 `startsWith` 对 `trimStart()` 后的行做匹配 —— 不靠行号、不靠字节偏移。
-锚点不在时：
+只有**起始标记和声明的结束标记都找到**时，该项才真的被切除。缺任一个：
 
 - 该项单独报 `unmatched`（`/purge status` 里看得到）
-- 该项跳过，其余照常执行
+- 该项跳过、文本一字节不动，其余项照常执行
 - 绝不在猜测的边界上截断提示词
 
-真实例子：没有 `think` 工具的 omp 会话里，`SCRATCHPAD` 会正常报
-`unmatched  § Scratchpad`，其他全部 applied。这是状态机在工作，不是 bug。
+`end: null` 是**另一种显式声明**，意思是「本段一直到块末尾」（只有 `§ Critical` 这么写）。
+它绝不会由一次失败的搜索推断出来。
+
+另有一层兄弟护栏：扫描结束标记的途中一旦撞到**别的 cut 的起始标记**，就在那里收边。
+所以一个标题被改名，代价是丢一项，不是丢掉后面整篇。
+
+两个真实例子：
+
+- 没有 `think` 工具的 omp 会话里，`SCRATCHPAD` 报 `unmatched  § Scratchpad`，其他全部 applied。
+  状态机按设计工作。
+- `omp` 把 `§ Workflow` 改名成 `§ Process`：`TOOL_POLICY` 与 `WORKFLOW` 转 `unmatched`，
+  该块剩下的约 100 KB 原样保留。（v0.1.0 在这里会静默吃穿到只剩 61 字符 —— 这正是 v0.1.1
+  修掉的问题，回归测试见 `test/omp-purge-cuts.test.mjs`。）
 
 ## 验证
 
@@ -143,9 +154,13 @@ npm test
 
 ## 局限 —— 信任它之前请读这段
 
-- **锚点绑定版本。** 在 omp 18.12.6 上验证过。omp 升级后若改写这些小标题，退化成 `unmatched`
-  而不是坏提示词 —— 但也就意味着人设可能没在替换你以为它替换的东西。每次升级 omp 之后重跑
-  `/purge status`。`ROLE_SECTION` 报 `unmatched` 就等于「宿主身份还在」。
+- **锚点绑定版本，这是刻意的取舍。** 定位一个段落有三条路：
+  (a) 靠行号/字节偏移 —— 最省事，任何一次重排都会灾难性失效；
+  (b) 语义解析模板 —— 要拿到模板而不是渲染后文本，而且把你焊死在 omp 的内部渲染管线上；
+  (c) 锚点文本 —— 能扛住段落重排和正文改写，只在标题本身被改名时失效。
+  本扩展选 (c)，并把失效做成**可见且局部**的：标题被改名，代价就是 `/purge status` 里多一行
+  `unmatched`，兄弟护栏阻止它扩散。每次升级 omp 之后重跑 `/purge status`。`ROLE_SECTION` 报
+  `unmatched` 就等于「宿主身份还在」—— 这一行绝不能忽略。
 - **工具 schema 不是提示词。** 工具通过 API `tools` 参数到达模型，不经过 `systemPrompt`。
   任何提示词层扩展都删不掉一个工具；那要用 `omp --no-extensions`、`setActiveTools` 或你的
   omp 工具配置。

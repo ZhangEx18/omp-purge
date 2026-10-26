@@ -127,14 +127,26 @@ Fourteen anchors, taken from the rendered text of omp 18.12.6's
 ### Safe degradation
 
 Every anchor is matched by a line-level `startsWith` against the trimmed line — never by index,
-never by byte offset. When an anchor is absent:
+never by byte offset. A cut is only removed when **both** its start and its declared end marker are
+found. When either is absent:
 
 - that single cut is reported `unmatched` in `/purge status`
-- the cut is skipped; the rest still run
+- the cut is skipped and its text is left byte-identical; the other cuts still run
 - the prompt is never truncated at a guessed boundary
 
-A real example: on an omp session without the `think` tool, `SCRATCHPAD` legitimately reports
-`unmatched  § Scratchpad`, and everything else applies. That is the state machine working, not a bug.
+`end: null` is a separate, explicit declaration meaning "this section runs to the end of the block"
+(only `§ Critical` uses it). It is never inferred from a failed search.
+
+A sibling guard backs this up: while scanning for an end marker, hitting any *other* cut's start
+marker ends the span there. So a renamed heading costs you one cut, not the rest of the document.
+
+Two real examples:
+
+- On an omp session without the `think` tool, `SCRATCHPAD` reports `unmatched  § Scratchpad` and
+  everything else applies. The state machine working as intended.
+- `omp` renames `§ Workflow` to `§ Process`: `TOOL_POLICY` and `WORKFLOW` go `unmatched`, and the
+  remaining ~100 KB of the block survives untouched. (v0.1.0 silently ate all of it down to 61
+  characters here — that is what the v0.1.1 fix addresses; see `test/omp-purge-cuts.test.mjs`.)
 
 ## Verify
 
@@ -149,10 +161,16 @@ toggle, `status`, `cut` overrides, `source` switching, reload, fallback, idempot
 
 ## Limits — read this before trusting it
 
-- **Anchors are version-pinned.** They were verified against omp 18.12.6. An omp upgrade that
-  rewrites those headings degrades to `unmatched` cuts, not to a broken prompt — but it also means
-  the persona may no longer be replacing what you think it is. Re-run `/purge status` after every
-  omp upgrade. `unmatched` on `ROLE_SECTION` means "the host identity is still there".
+- **Anchors are version-pinned, and that is a deliberate trade.** Three ways to find a section:
+  (a) by index/offset — cheapest, breaks catastrophically on any reformat;
+  (b) by semantic parse of the template — needs the template, not the rendered text, and pins you to
+  omp's internal rendering pipeline;
+  (c) by anchor text — survives reordering and body edits, breaks only when the heading itself is
+  renamed.
+  This extension picks (c), and makes the failure mode *visible and local*: a renamed heading costs
+  exactly one `unmatched` row in `/purge status`, and the sibling guard stops it from spreading.
+  Re-run `/purge status` after every omp upgrade. `unmatched` on `ROLE_SECTION` means "the host
+  identity is still there" — the one row you must never ignore.
 - **Tool schemas are not prompts.** Tools reach the model through the API `tools` parameter, not
   through `systemPrompt`. No prompt-layer extension can remove a tool; use
   `omp --no-extensions`, `setActiveTools`, or your omp tool config for that.

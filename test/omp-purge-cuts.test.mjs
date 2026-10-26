@@ -48,12 +48,30 @@ const { CUTS, CUT_IDS, applyCuts, removeSpan, isFooterBlock } = mod;
 }
 
 {
-	// 起始标记存在但结束标记缺失 → 切到末尾，且仍然算 matched
+	// 声明了结束标记却一个都没命中 → 必须放弃该 cut，绝不允许「切到末尾」。
+	// 这是 v0.1.1 修的 bug：曾把整块提示词从 112KB 静默吃到 61 字符。
+	const text = ["head", "§ Workflow", "1. Scope", "2. Research", "still text"].join("\n");
+	const out = removeSpan(text, ["§ Workflow"], ["§ Delivery"]);
+	assert.equal(out.matched, false, "missing end marker degrades, never swallows the rest");
+	assert.equal(out.text, text, "text must stay byte-identical when the end marker is absent");
+}
+
+{
+	// null 才是声明式 to-end：只有显式写 end: null 的项才切到块末尾
 	const text = ["head", "§ Critical", "everything after goes"].join("\n");
-	const out = removeSpan(text, ["§ Critical"], ["§ Delivery"]);
+	const out = removeSpan(text, ["§ Critical"], null);
 	assert.equal(out.matched, true);
 	assert.ok(!out.text.includes("everything after goes"));
 	assert.ok(out.text.includes("head"));
+}
+
+{
+	// 兄弟护栏：结束标记被改名，但先撞到下一个段的起点 → 切到该起点，而不是吃穿
+	const text = ["§ Workflow", "1. Scope", "§ Delivery", "<contract>", "body"].join("\n");
+	const out = removeSpan(text, ["§ Workflow"], ["§ RenamedAway"], false, true);
+	assert.equal(out.matched, true, "sibling guard supplies a trustworthy boundary");
+	assert.ok(!out.text.includes("1. Scope"), "own section removed");
+	assert.ok(out.text.includes("§ Delivery"), "sibling section preserved");
 }
 
 {
@@ -135,10 +153,16 @@ const { CUTS, CUT_IDS, applyCuts, removeSpan, isFooterBlock } = mod;
 }
 
 {
-	// 全切空后必须返回空串而不是残留换行，交给上层决定丢弃该块
-	const only = ["§ Role", "id"].join("\n");
-	const out = applyCuts(only, new Set(["ROLE_SECTION"]), "static");
-	assert.equal(out.text, "", "fully-cut span collapses to empty string");
+	// 全切空后必须返回空串而不是残留换行，交给上层决定丢弃该块。
+	// § Critical 是声明式 to-end（end: null），所以它之后的一切都会被吃掉。
+	const only = ["§ Critical", "id", "<critical>", "hard", "</critical>"].join("\n");
+	const out = applyCuts(only, new Set(["CRITICAL"]), "static");
+	assert.equal(out.text, "", "declared to-end cut collapses the block to empty string");
+
+	// 对照组：非 to-end 的项切空后，剩下的兄弟段必须原样保留
+	const withSibling = ["§ Critical", "id", "§ Delivery", "del"].join("\n");
+	const kept = applyCuts(withSibling, new Set(["CRITICAL"]), "static");
+	assert.equal(kept.text, "", "§ Critical still runs to the end even with a sibling after it");
 }
 
 // ---------------------------------------------------------------- isFooterBlock

@@ -100,7 +100,11 @@ interface Cut {
 	group: Group;
 	/** 起始标记：命中任一即以该行为切除起点（行首 trimStart 比较）。 */
 	start: string[];
-	/** 结束标记：命中任一即以该行为切除终点（不含该行）；null = 切到静态块末尾。 */
+	/**
+	 * 结束标记：命中任一即以该行为切除终点（不含该行）。
+	 * `null` = 明确声明「本段一直到块末尾」（如 § Critical）。这是**声明式**的 to-end，
+	 * 与「声明了结束标记但没找到」必须是两种不同处理 —— 后者要安全退化，不能静默吞掉余下全文。
+	 */
 	end: string[] | null;
 	/** 该 cut 在哪个模式下默认生效。 */
 	cutIn: { replace: boolean; strict: boolean };
@@ -108,6 +112,11 @@ interface Cut {
 	scope?: "static" | "footer";
 	/** true = 结束标记行本身也一并切除（闭区间，如 <critical>…</critical>）。 */
 	consumeEnd?: boolean;
+	/**
+	 * 兄弟边界护栏：扫描结束标记时，若先遇到**任意其它 cut 的起始标记**就停在那里。
+	 * 给了一层冗余保护 —— 即使本项的结束标记被上游改名，也不会吃掉后面的段。
+	 */
+	siblingGuard?: boolean;
 }
 
 /**
@@ -219,6 +228,7 @@ const CUTS: Cut[] = [
 		start: ["§ Critical"],
 		end: null,
 		cutIn: { replace: false, strict: true },
+		siblingGuard: false,
 	},
 	{
 		id: "FOOTER_CRITICAL",
@@ -237,12 +247,28 @@ const CUT_BY_ID = new Map(CUTS.map(cut => [cut.id, cut]));
 
 type CutStatus = "applied" | "unmatched" | "skipped";
 
+/**
+ * 判断某一行是否是「别的 cut」的起始标记。
+ * 用于兄弟护栏：本项扫描结束标记时，一旦先碰到别人的段头，就说明本项的范围已经越界。
+ */
+function isOtherCutStart(line: string, ownStart: string[]): boolean {
+	for (const cut of CUTS) {
+		if (cut.start === ownStart) continue;
+		if (cut.start[0] === "\u0000PREAMBLE") continue;
+		for (const marker of cut.start) {
+			if (line.startsWith(marker)) return true;
+		}
+	}
+	return false;
+}
+
 /** 把一段静态提示词按标记切成块后移除目标区间。 */
 function removeSpan(
 	text: string,
 	startMarkers: string[],
 	endMarkers: string[] | null,
 	consumeEnd = false,
+	siblingGuard = false,
 ): { text: string; matched: boolean } {
 	const lines = text.split("\n");
 	const startsAt = lines.findIndex(line => startMarkers.some(m => line.trimStart().startsWith(m)));
@@ -257,15 +283,28 @@ function removeSpan(
 	if (startsAt === -1) return { text, matched: false };
 
 	let endsAt = lines.length;
+	let foundEnd = endMarkers === null; // end === null 是声明式的「切到块末尾」
 	if (endMarkers) {
 		for (let i = startsAt + 1; i < lines.length; i += 1) {
-			if (endMarkers.some(m => lines[i].trimStart().startsWith(m))) {
+			const line = lines[i].trimStart();
+			if (endMarkers.some(m => line.startsWith(m))) {
 				// 开区间（默认）= 结束标记行留给下一段；闭区间 = 连它一起吃掉。
 				endsAt = consumeEnd ? i + 1 : i;
+				foundEnd = true;
+				break;
+			}
+			// 兄弟护栏：先撞到别的段的起点，说明本段的范围已经越界了。
+			if (siblingGuard && isOtherCutStart(line, startMarkers)) {
+				endsAt = i;
+				foundEnd = true;
 				break;
 			}
 		}
 	}
+
+	// 声明了结束标记却一个都没命中 → 边界不可信，整项放弃（安全退化）。
+	// 绝不能退化成「切到末尾」：那会静默吞掉后续所有段落，并让它们的状态全部变成假 unmatched。
+	if (!foundEnd) return { text, matched: false };
 
 	// 连带吃掉切除区间两端的空行，避免留下连续 3 个以上换行。
 	const head = lines.slice(0, startsAt);
@@ -292,7 +331,13 @@ function applyCuts(
 			status[cut.id] = "skipped";
 			continue;
 		}
-		const result = removeSpan(out, cut.start, cut.end, cut.consumeEnd === true);
+		const result = removeSpan(
+			out,
+			cut.start,
+			cut.end,
+			cut.consumeEnd === true,
+			cut.siblingGuard !== false,
+		);
 		out = result.text;
 		status[cut.id] = result.matched ? "applied" : "unmatched";
 	}
