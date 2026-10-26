@@ -103,7 +103,7 @@ async function freshExtension() {
 	mod.default(pi);
 
 	const ctx = {
-		cwd: "/Users/zex/demo-repo",
+		cwd: "/Users/example/demo-repo",
 		ui: {
 			notify: (message, level) => notes.push({ level, message }),
 			setStatus: (key, text) => statuses.push({ key, text }),
@@ -152,7 +152,7 @@ async function freshExtension() {
 	assert.ok(!/Each response MUST advance/.test(joined), "footer <critical> cut");
 	assert.ok(!res.systemPrompt.some((b) => b.includes("</critical>")), "no orphan closing tag");
 
-	assert.ok(joined.includes("Current working directory: /Users/zex/demo-repo"), "cwd injected");
+	assert.ok(joined.includes("Current working directory: /Users/example/demo-repo"), "cwd injected");
 	assert.ok(res.systemPrompt[1].includes("PRIME DIRECTIVE"), "persona injected as its own block");
 	assert.ok(res.systemPrompt.some((b) => b.includes("<repo-rules>")), "user repo rules survive");
 	assert.ok(res.systemPrompt.some((b) => b.includes("## MCP Tool Routes")), "MCP routes survive");
